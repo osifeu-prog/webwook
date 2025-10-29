@@ -3,15 +3,16 @@ import logging
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from flask import Flask, request
-import git
-from git import Repo
 import subprocess
+import datetime
 
 # Configuration
 BOT_TOKEN = os.environ.get('BOT_TOKEN')
 WEBHOOK_URL = os.environ.get('WEBHOOK_URL')
 GIT_REPO_URL = os.environ.get('GIT_REPO_URL')
 GIT_BRANCH = os.environ.get('GIT_BRANCH', 'main')
+GIT_USERNAME = os.environ.get('GIT_USERNAME', 'telegram-bot')
+GIT_EMAIL = os.environ.get('GIT_EMAIL', 'bot@example.com')
 
 # Initialize Flask app
 app = Flask(__name__)
@@ -26,39 +27,53 @@ logger = logging.getLogger(__name__)
 class GitBot:
     def __init__(self):
         self.repo_path = "./git_repo"
+        self.setup_git_config()
         self.setup_repo()
     
+    def setup_git_config(self):
+        """Configure Git user settings"""
+        try:
+            subprocess.run(['git', 'config', '--global', 'user.name', GIT_USERNAME], check=True)
+            subprocess.run(['git', 'config', '--global', 'user.email', GIT_EMAIL], check=True)
+            logger.info("Git configuration set successfully")
+        except subprocess.CalledProcessError as e:
+            logger.error(f"Error setting Git config: {e}")
+    
     def setup_repo(self):
-        """Setup or clone Git repository"""
+        """Setup or clone Git repository using subprocess"""
         try:
             if os.path.exists(self.repo_path):
-                self.repo = Repo(self.repo_path)
-                origin = self.repo.remotes.origin
-                origin.pull()
+                logger.info("Repository exists, pulling latest changes")
+                subprocess.run(['git', '-C', self.repo_path, 'pull'], check=True)
             else:
-                self.repo = Repo.clone_from(GIT_REPO_URL, self.repo_path)
-                logger.info(f"Repository cloned successfully to {self.repo_path}")
-        except Exception as e:
+                logger.info(f"Cloning repository from {GIT_REPO_URL}")
+                subprocess.run(['git', 'clone', GIT_REPO_URL, self.repo_path], check=True)
+        except subprocess.CalledProcessError as e:
             logger.error(f"Error setting up repository: {e}")
     
     def commit_and_push(self, filename, content, commit_message):
-        """Commit and push changes to Git"""
+        """Commit and push changes to Git using subprocess"""
         try:
+            # Create directory if it doesn't exist
+            os.makedirs(os.path.dirname(os.path.join(self.repo_path, filename)), exist_ok=True)
+            
             # Write file
             file_path = os.path.join(self.repo_path, filename)
             with open(file_path, 'w', encoding='utf-8') as f:
                 f.write(content)
             
-            # Git operations
-            self.repo.git.add(file_path)
-            self.repo.index.commit(commit_message)
-            origin = self.repo.remotes.origin
-            origin.push()
+            # Git operations using subprocess
+            subprocess.run(['git', '-C', self.repo_path, 'add', filename], check=True)
+            subprocess.run(['git', '-C', self.repo_path, 'commit', '-m', commit_message], check=True)
+            subprocess.run(['git', '-C', self.repo_path, 'push', 'origin', GIT_BRANCH], check=True)
             
             logger.info(f"Successfully pushed {filename} to Git")
             return True
-        except Exception as e:
+        except subprocess.CalledProcessError as e:
             logger.error(f"Error committing to Git: {e}")
+            return False
+        except Exception as e:
+            logger.error(f"Unexpected error: {e}")
             return False
 
 # Initialize bot and Git handler
@@ -89,17 +104,16 @@ Just send text to save it as a note with timestamp.
 async def git_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Check Git repository status"""
     try:
-        repo = git_bot.repo
-        active_branch = repo.active_branch
-        last_commit = repo.head.commit
-        commit_time = last_commit.committed_datetime
+        result = subprocess.run(
+            ['git', '-C', git_bot.repo_path, 'log', '--oneline', '-5'],
+            capture_output=True, text=True, check=True
+        )
         
         status_msg = f"""
 📊 Git Repository Status:
-📍 Branch: {active_branch}
-🕒 Last Commit: {commit_time}
-💬 Message: {last_commit.message}
-👤 Author: {last_commit.author}
+📍 Branch: {GIT_BRANCH}
+🔄 Last 5 commits:
+{result.stdout}
 """
         await update.message.reply_text(status_msg)
     except Exception as e:
@@ -114,11 +128,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     user = update.message.from_user
-    filename = f"notes/note_{update.message.date.strftime('%Y%m%d_%H%M%S')}.txt"
-    commit_message = f"Add note from {user.first_name} at {update.message.date}"
+    timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+    filename = f"notes/note_{timestamp}.txt"
+    commit_message = f"Add note from {user.first_name} at {timestamp}"
     
-    file_content = f"""Note from: {user.first_name} ({user.username})
-Date: {update.message.date}
+    file_content = f"""Note from: {user.first_name} ({user.username if user.username else 'N/A'})
+Date: {datetime.datetime.now()}
 User ID: {user.id}
 
 Content:
@@ -134,66 +149,43 @@ Content:
             f"💬 Commit: {commit_message}"
         )
     else:
-        await update.message.reply_text("❌ Failed to save to Git. Please check logs.")
+        await update.message.reply_text("❌ Failed to save to Git. Please try again later.")
 
-async def save_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Save text to specific filename"""
-    if not context.args:
-        await update.message.reply_text("Usage: /save <filename>")
-        return
-    
-    filename = context.args[0]
-    
-    # Ask for content
-    context.user_data['awaiting_content'] = filename
-    await update.message.reply_text(f"Please send the content for file '{filename}':")
+@app.route('/')
+def index():
+    return "🤖 Git Telegram Bot is running on Railway!"
 
-async def handle_file_content(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle file content after /save command"""
-    if 'awaiting_content' in context.user_data:
-        filename = context.user_data['awaiting_content']
-        content = update.message.text
-        
-        commit_message = f"Add file {filename} via bot"
-        success = git_bot.commit_and_push(filename, content, commit_message)
-        
-        if success:
-            await update.message.reply_text(f"✅ Successfully saved to {filename} in Git!")
-        else:
-            await update.message.reply_text("❌ Failed to save file.")
-        
-        # Clear the state
-        del context.user_data['awaiting_content']
+@app.route('/health')
+def health():
+    return "✅ Bot is healthy"
 
-def setup_bot():
-    """Setup Telegram bot application"""
+@app.route(f'/{BOT_TOKEN}', methods=['POST'])
+def webhook():
+    """Webhook endpoint for Telegram"""
+    if request.method == "POST":
+        update = Update.de_json(request.get_json(), application.bot)
+        application.update_queue.put(update)
+    return "OK"
+
+def main():
+    """Main function to start the bot"""
+    # Create Telegram application
     application = Application.builder().token(BOT_TOKEN).build()
     
     # Add handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("gitstatus", git_status))
-    application.add_handler(CommandHandler("save", save_file))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     
-    # Set webhook
+    # Set webhook for Railway
     application.run_webhook(
         listen="0.0.0.0",
-        port=5000,
+        port=int(os.environ.get('PORT', 5000)),
         url_path=BOT_TOKEN,
-        webhook_url=f"{WEBHOOK_URL}/{BOT_TOKEN}"
+        webhook_url=f"{WEBHOOK_URL}/{BOT_TOKEN}",
+        secret_token=os.environ.get('SECRET_TOKEN')
     )
-    
-    return application
-
-@app.route('/')
-def index():
-    return "🤖 Git Telegram Bot is running!"
-
-@app.route('/health')
-def health():
-    return "✅ Bot is healthy"
 
 if __name__ == '__main__':
-    # Start the bot
-    setup_bot()
+    main()
