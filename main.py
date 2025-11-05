@@ -23,15 +23,12 @@ if missing:
     print("Missing environment variables:", ", ".join(missing), file=sys.stderr)
     sys.exit(1)
 
-# Normalize webhook URL to ensure trailing slash
 if not WEBHOOK_URL.endswith("/"):
     WEBHOOK_URL += "/"
 
-# Logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-# Flask app (used only for health checks and to satisfy platform needs)
 flask_app = Flask(__name__)
 
 class GitHandler:
@@ -42,7 +39,14 @@ class GitHandler:
         self._configure_git()
         self._ensure_repo()
 
-    def _run(self, *args, **kwargs):
+    def _run(self, *args, capture_output=False, text=False, check=False):
+        kwargs = {}
+        if capture_output:
+            kwargs["capture_output"] = True
+        if text:
+            kwargs["text"] = True
+        if check:
+            kwargs["check"] = True
         return subprocess.run(list(args), **kwargs)
 
     def _configure_git(self):
@@ -64,6 +68,24 @@ class GitHandler:
         except subprocess.CalledProcessError as e:
             logger.error("Git repo setup failed: %s", e)
 
+    def repo_ready(self):
+        # check if the path exists and is a git repo
+        if not os.path.exists(self.repo_path):
+            return False
+        try:
+            res = self._run("git", "-C", self.repo_path, "rev-parse", "--is-inside-work-tree", capture_output=True, text=True, check=True)
+            return res.stdout.strip() == "true"
+        except subprocess.CalledProcessError:
+            return False
+
+    def last_commits(self, n=5):
+        try:
+            res = self._run("git", "-C", self.repo_path, "log", "--oneline", f"-{n}", capture_output=True, text=True, check=True)
+            return res.stdout.strip()
+        except subprocess.CalledProcessError as e:
+            logger.warning("git log failed: %s", e)
+            return None
+
     def commit_and_push(self, filename, content, message):
         try:
             abs_path = os.path.join(self.repo_path, filename)
@@ -72,7 +94,6 @@ class GitHandler:
                 f.write(content)
 
             self._run("git", "-C", self.repo_path, "add", filename, check=True)
-            # check for changes
             status = self._run("git", "-C", self.repo_path, "status", "--porcelain", capture_output=True, text=True)
             if status.stdout.strip() == "":
                 logger.info("No changes to commit for %s", filename)
@@ -99,11 +120,17 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("/start, /help, /gitstatus — שלח טקסט לשמירה כקובץ.")
 
 async def git_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        res = subprocess.run(["git", "-C", git.repo_path, "log", "--oneline", "-5"], capture_output=True, text=True, check=True)
-        await update.message.reply_text("📊 אחרונים:\n" + (res.stdout or "(no commits)"))
-    except Exception as e:
-        await update.message.reply_text(f"❌ שגיאה ב־git: {e}")
+    if not git.repo_ready():
+        await update.message.reply_text("❌ הריפו לא זמין או לא נמצא כאן. וודא שהמשתנה GIT_REPO_URL נכון והשרת הצליח לשכפל את הריפו בעת אתחול.")
+        return
+
+    commits = git.last_commits(5)
+    if commits is None:
+        await update.message.reply_text("❌ לא ניתן לקרוא את ה־git log כרגע. בדוק לוגים בשרת.")
+    elif commits.strip() == "":
+        await update.message.reply_text("ℹ️ הריפו ריק — לא נמצאו קומיטים עדיין.")
+    else:
+        await update.message.reply_text("📊 אחרונים:\n" + commits)
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.message.from_user
@@ -117,13 +144,14 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"UTC: {datetime.datetime.utcnow().isoformat()}\n\n"
         f"{text}\n"
     )
+
     ok = git.commit_and_push(filename, content, message)
     if ok:
         await update.message.reply_text(f"✅ נשמר: {filename}")
     else:
-        await update.message.reply_text("❌ שגיאה בשמירה. בדוק לוגים.")
+        await update.message.reply_text("❌ שגיאה בשמירה. בדוק לוגים בשרת.")
 
-# Flask endpoints for health and webhook forwarding (Telegram posts here)
+# Flask endpoints for health
 @flask_app.route("/", methods=["GET"])
 def index():
     return "OK"
@@ -133,25 +161,22 @@ def health():
     return "healthy"
 
 def run():
-    # Build Telegram application
     application = Application.builder().token(BOT_TOKEN).build()
     application.add_handler(CommandHandler("start", start_cmd))
     application.add_handler(CommandHandler("help", help_cmd))
     application.add_handler(CommandHandler("gitstatus", git_status))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
-    # Run webhook server (PTB will run its internal aiohttp/werkzeug server that listens)
     webhook_path = BOT_TOKEN
     full_webhook = f"{WEBHOOK_URL}{webhook_path}"
     logger.info("Setting webhook to %s", full_webhook)
 
-    # run_webhook uses installed webhooks extra (requirements.txt ensures it)
     application.run_webhook(
         listen="0.0.0.0",
         port=PORT,
         url_path=webhook_path,
         webhook_url=full_webhook,
-        secret_token=SECRET_TOKEN  # None ok
+        secret_token=SECRET_TOKEN
     )
 
 if __name__ == "__main__":
