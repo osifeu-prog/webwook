@@ -1,6 +1,6 @@
 { pkgs }: {
   deps = [
-    pkgs.python3
+    pkgs.python311
     pkgs.git
     pkgs.openssh
   ];
