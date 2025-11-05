@@ -6,6 +6,5 @@ __pycache__/
 env/
 venv/
 .git_repo/
-.ngrok/
 .env
 *.log
