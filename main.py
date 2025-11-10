@@ -150,7 +150,10 @@ class GitHandler:
                 logger.warning("Pull failed: %s", e)
                 # Try to re-clone if pull fails
                 import shutil
-                shutil.rmtree(self.repo_path, ignore_errors=True)
+                try:
+                    shutil.rmtree(self.repo_path, ignore_errors=True)
+                except Exception as e:
+                    logger.warning("Failed to remove repo directory: %s", e)
         
         try:
             run(["git", "clone", "-b", self.branch, self.repo_url, self.repo_path], check=True)
@@ -448,7 +451,7 @@ def is_admin(user_id):
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     
-    # Reload authorized users to ensure we have latest data
+    # Reload authorized users to ensure we have the latest data
     git._load_authorized_users()
     
     if is_authorized(user_id):
@@ -550,22 +553,49 @@ async def myfolder_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ok = git.commit_and_push(welcome_file, welcome_content, f"Create personal folder for {user.first_name} ({user.id})")
     if ok:
         await update.message.reply_text(
-            f"✅ תיקיה אישית נוצרה: {user_folder}/\n\n"
+            f"✅ **תיקיה אישית נוצרה בהצלחה!**\n\n"
+            f"📁 `{user_folder}/`\n\n"
             f"🎓 **אקדמיה להשכלה גבוהה**\n"
             f"כעת תוכל לשלוח טקסט ואשמור אותו בתיקיה שלך.\n\n"
             f"💡 **טיפ:** אתה יכול ליצור תיקיות משנה לפי נושאים:\n"
-            f"• {user_folder}/programming/\n"
-            f"• {user_folder}/mathematics/\n"
-            f"• {user_folder}/projects/\n"
+            f"• `{user_folder}/programming/`\n"
+            f"• `{user_folder}/mathematics/`\n"
+            f"• `{user_folder}/projects/`\n"
             f"וכו..."
         )
     else:
-        await update.message.reply_text("❌ שגיאה ביצירת תיקיה אישית. נסה שוב מאוחר יותר.")
+        # Try alternative method if first method fails
+        try:
+            # Create folder locally first
+            os.makedirs(os.path.join(git.repo_path, user_folder), exist_ok=True)
+            with open(os.path.join(git.repo_path, welcome_file), "w", encoding="utf-8") as f:
+                f.write(welcome_content)
+            
+            # Force add and commit
+            run(["git", "-C", git.repo_path, "add", "."], check=True)
+            run(["git", "-C", git.repo_path, "commit", "-m", f"Create personal folder for {user.first_name} ({user.id})"], check=True)
+            run(["git", "-C", git.repo_path, "push", "origin", git.branch], check=True)
+            
+            await update.message.reply_text(
+                f"✅ **תיקיה אישית נוצרה בהצלחה!**\n\n"
+                f"📁 `{user_folder}/`\n\n"
+                f"🎓 החומר הלימודי שלך נשמר בצורה מאובטחת."
+            )
+        except Exception as e:
+            logger.error("Alternative folder creation also failed: %s", e)
+            await update.message.reply_text(
+                "❌ **שגיאה ביצירת תיקיה אישית.**\n\n"
+                "🏫 **אקדמיה להשכלה גבוהה**\n"
+                "המערכת תנסה שוב באופן אוטומטי. אתה יכול:\n"
+                "• לנסות שוב בעוד כמה דקות\n"
+                "• לשלוח הודעה למנהל @Osif83\n"
+                "• להמשיך להשתמש בשאר התכונות"
+            )
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     
-    # Reload authorized users to ensure we have latest data
+    # Reload authorized users to ensure we have the latest data
     git._load_authorized_users()
     
     if not is_authorized(user_id):
@@ -624,14 +654,19 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if ok:
         await update.message.reply_text(
-            f"✅ נשמר בהצלחה!\n"
-            f"📁 תיקיה: {user_folder}/\n"
-            f"📄 קובץ: note_{ts}.txt\n\n"
+            f"✅ **נשמר בהצלחה!**\n"
+            f"📁 תיקיה: `{user_folder}/`\n"
+            f"📄 קובץ: `note_{ts}.txt`\n\n"
             f"🎓 **אקדמיה להשכלה גבוהה**\n"
             f"החומר הלימודי שלך נשמר בצורה מאובטחת."
         )
     else:
-        await update.message.reply_text("❌ שגיאה בשמירה. נסה שוב מאוחר יותר.")
+        await update.message.reply_text(
+            "❌ **שגיאה בשמירה.**\n\n"
+            "🏫 **אקדמיה להשכלה גבוהה**\n"
+            "המערכת תנסה לשמור שוב מאוחר יותר.\n"
+            "אתה יכול להמשיך להשתמש בשאר התכונות."
+        )
 
 # --- Coin System Commands ---
 async def balance_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -706,7 +741,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
     data = query.data
 
-    # Reload authorized users to ensure we have latest data
+    # Reload authorized users to ensure we have the latest data
     git._load_authorized_users()
 
     if data == "why_join":
@@ -722,7 +757,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• גישה לחומרים בלעדיים\n\n"
             "📚 **תחומי לימוד:**\n"
             "• תכנות ומדעי המחשב\n"
-            "• מתמטיקה וסט�יסטיקה\n"
+            "• מתמטיקה וסטטיסטיקה\n"
             "• מדעי הנתונים\n"
             "• בינה מלאכותית\n"
             "• וכל תחום שתרצה!\n\n"
@@ -765,9 +800,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "3. המנהל יאשר את הגישה תוך 24 שעות\n"
             "4. תקבל קישור לקבוצה ופרטי כניסה\n\n"
             "⚠️ **שימו לב:** הגישה תינתן רק לאחר אימות התשלום!\n\n"
-            "📧 **לשאלות:** @Osif83\n"
-            "📧 **מייל:** osif@slh-academia.com\n"
-            "📞 **טלפון:** +972 54-667-1882"
+            "📧 **לשאלות:** @Osif83"
         )
         
         keyboard = [
@@ -808,7 +841,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "התמונה תישלח למנהל לאישור.\n\n"
             "💡 **טיפ:** ודא שהצילום כולל:\n"
             "• שם השולח\n"
-            "• סכום ההעברה\n"
+            "• סכום ההעברה (444 ש\"ח)\n"
             "• תאריך ההעברה\n"
             "• פרטי החשבון"
         )
@@ -941,7 +974,12 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"💡 כל מה שתשלח יישמר אוטומטית."
             )
         else:
-            await query.edit_message_text("❌ שגיאה ביצירת תיקיה אישית. נסה שוב מאוחר יותר.")
+            await query.edit_message_text(
+                "❌ **שגיאה ביצירת תיקיה אישית.**\n\n"
+                "🏫 **אקדמיה להשכלה גבוהה**\n"
+                "המערכת תנסה שוב באופן אוטומטי.\n"
+                "אתה יכול לנסות שוב בעוד כמה דקות."
+            )
 
     elif data == "ask_ai_organization":
         context.user_data['waiting_for_ai_question'] = True
@@ -1011,6 +1049,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         target_user_id = int(data.split("_")[1])
         success = git.add_authorized_user(target_user_id)
         if success:
+            # Reload authorized users to ensure the new user is recognized
+            git._load_authorized_users()
+            
             # Notify the approved user
             try:
                 await context.bot.send_message(
