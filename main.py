@@ -4,6 +4,7 @@ import subprocess
 import datetime
 import json
 import uuid
+import requests
 from flask import Flask, request
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
@@ -17,6 +18,8 @@ GIT_USERNAME = os.getenv("GIT_USERNAME", "telegram-bot")
 GIT_EMAIL = os.getenv("GIT_EMAIL", "bot@example.com")
 PORT = int(os.getenv("PORT", 8080))
 GROUP_LINK = os.getenv("GROUP_LINK", "https://t.me/your_group_link")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+HUGGINGFACE_API_KEY = os.getenv("HUGGINGFACE_API_KEY")
 
 # --- טעינת מנהלים - עם ערך ברירת מחדל אם לא הוגדר ---
 ADMIN_USER_IDS_STR = os.getenv("ADMIN_USER_IDS", "224223270")
@@ -48,6 +51,77 @@ def run(cmd, **kwargs):
     logger.debug("RUN: %s", " ".join(cmd))
     return subprocess.run(cmd, **kwargs)
 
+class AIService:
+    def __init__(self):
+        self.openai_key = OPENAI_API_KEY
+        self.huggingface_key = HUGGINGFACE_API_KEY
+
+    def ask_openai(self, prompt, model="gpt-3.5-turbo"):
+        if not self.openai_key:
+            return "❌ OpenAI API key not configured"
+        
+        headers = {
+            "Authorization": f"Bearer {self.openai_key}",
+            "Content-Type": "application/json"
+        }
+        
+        data = {
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.7
+        }
+        
+        try:
+            response = requests.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers=headers,
+                json=data,
+                timeout=30
+            )
+            if response.status_code == 200:
+                return response.json()["choices"][0]["message"]["content"]
+            else:
+                return f"❌ OpenAI API error: {response.status_code}"
+        except Exception as e:
+            return f"❌ OpenAI request failed: {str(e)}"
+
+    def ask_huggingface(self, prompt, model="microsoft/DialoGPT-large"):
+        if not self.huggingface_key:
+            return "❌ HuggingFace API key not configured"
+        
+        headers = {
+            "Authorization": f"Bearer {self.huggingface_key}",
+            "Content-Type": "application/json"
+        }
+        
+        data = {
+            "inputs": prompt,
+            "parameters": {
+                "max_length": 500,
+                "temperature": 0.7,
+                "do_sample": True
+            }
+        }
+        
+        try:
+            response = requests.post(
+                f"https://api-inference.huggingface.co/models/{model}",
+                headers=headers,
+                json=data,
+                timeout=30
+            )
+            if response.status_code == 200:
+                result = response.json()
+                if isinstance(result, list) and len(result) > 0:
+                    return result[0].get("generated_text", prompt)
+                return prompt
+            else:
+                return f"❌ HuggingFace API error: {response.status_code}"
+        except Exception as e:
+            return f"❌ HuggingFace request failed: {str(e)}"
+
+ai_service = AIService()
+
 class GitHandler:
     def __init__(self, repo_url, repo_path=".git_repo"):
         self.repo_url = repo_url
@@ -74,6 +148,10 @@ class GitHandler:
                 return
             except subprocess.CalledProcessError as e:
                 logger.warning("Pull failed: %s", e)
+                # Try to re-clone if pull fails
+                import shutil
+                shutil.rmtree(self.repo_path, ignore_errors=True)
+        
         try:
             run(["git", "clone", "-b", self.branch, self.repo_url, self.repo_path], check=True)
             logger.info("Cloned repository")
@@ -90,16 +168,19 @@ class GitHandler:
         
         # Load from file if exists
         if os.path.exists(authorized_users_file):
-            with open(authorized_users_file, "r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if line and not line.startswith("#"):
-                        try:
-                            self.authorized_users.add(int(line))
-                        except ValueError:
-                            logger.warning("Invalid user ID in authorized_users.txt: %s", line)
+            try:
+                with open(authorized_users_file, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if line and not line.startswith("#"):
+                            try:
+                                self.authorized_users.add(int(line))
+                            except ValueError:
+                                logger.warning("Invalid user ID in authorized_users.txt: %s", line)
+            except Exception as e:
+                logger.error("Error reading authorized_users.txt: %s", e)
         
-        logger.info("Loaded %d authorized users", len(self.authorized_users))
+        logger.info("Loaded %d authorized users: %s", len(self.authorized_users), self.authorized_users)
 
     def repo_ready(self):
         return os.path.isdir(os.path.join(self.repo_path, ".git"))
@@ -115,21 +196,28 @@ class GitHandler:
 
     def commit_and_push(self, filename, content, message):
         if not self.repo_ready():
+            logger.error("Repo not ready for commit")
             return False
+        
         abs_path = os.path.join(self.repo_path, filename)
         try:
             os.makedirs(os.path.dirname(abs_path), exist_ok=True)
             with open(abs_path, "w", encoding="utf-8") as f:
                 f.write(content)
+            
             run(["git", "-C", self.repo_path, "add", filename], check=True)
             status = run(["git", "-C", self.repo_path, "status", "--porcelain"], capture_output=True, text=True)
+            
             if status.stdout.strip() == "":
+                logger.info("No changes to commit for %s", filename)
                 return True
+            
             run(["git", "-C", self.repo_path, "commit", "-m", message], check=True)
             run(["git", "-C", self.repo_path, "push", "origin", self.branch], check=True)
+            logger.info("Successfully committed and pushed: %s", filename)
             return True
         except Exception as e:
-            logger.error("Git operation failed: %s", e)
+            logger.error("Git operation failed for %s: %s", filename, e)
             return False
 
     def add_authorized_user(self, user_id):
@@ -143,30 +231,39 @@ class GitHandler:
                 f.write("# Admins are automatically added from ADMIN_USER_IDS\n\n")
         
         # Check if user already exists
-        with open(authorized_users_file, "r", encoding="utf-8") as f:
-            lines = f.readlines()
-        
         user_exists = False
-        for line in lines:
-            if line.strip() == str(user_id):
-                user_exists = True
-                break
+        try:
+            with open(authorized_users_file, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+            
+            for line in lines:
+                if line.strip() == str(user_id):
+                    user_exists = True
+                    break
+        except Exception as e:
+            logger.error("Error reading authorized users file: %s", e)
         
         if user_exists:
+            logger.info("User %s already in authorized list", user_id)
+            self.authorized_users.add(user_id)
             return True  # already exists
         
         # Add the user
-        with open(authorized_users_file, "a", encoding="utf-8") as f:
-            f.write(f"{user_id}\n")
-        
-        # Commit and push the change
         try:
-            run(["git", "-C", self.repo_path, "add", authorized_users_file], check=True)
-            run(["git", "-C", self.repo_path, "commit", "-m", f"Add authorized user {user_id}"], check=True)
-            run(["git", "-C", self.repo_path, "push", "origin", self.branch], check=True)
-            self.authorized_users.add(user_id)
-            logger.info("Added authorized user: %s", user_id)
-            return True
+            with open(authorized_users_file, "a", encoding="utf-8") as f:
+                f.write(f"{user_id}\n")
+            
+            # Commit and push the change
+            success = self.commit_and_push("authorized_users.txt", 
+                                         "".join(lines + [f"{user_id}\n"]), 
+                                         f"Add authorized user {user_id}")
+            if success:
+                self.authorized_users.add(user_id)
+                logger.info("Added authorized user: %s", user_id)
+                return True
+            else:
+                logger.error("Failed to commit authorized user addition")
+                return False
         except Exception as e:
             logger.error("Failed to add authorized user: %s", e)
             return False
@@ -178,35 +275,40 @@ class GitHandler:
             return True  # nothing to remove
         
         # Read all lines and remove the user
-        with open(authorized_users_file, "r", encoding="utf-8") as f:
-            lines = f.readlines()
-        
-        new_lines = []
-        user_removed = False
-        for line in lines:
-            if line.strip() != str(user_id):
-                new_lines.append(line)
-            else:
-                user_removed = True
-        
-        if not user_removed:
-            return True  # user not in file
-        
-        # Write back without the user
-        with open(authorized_users_file, "w", encoding="utf-8") as f:
-            f.writelines(new_lines)
-        
-        # Commit and push the change
         try:
-            run(["git", "-C", self.repo_path, "add", authorized_users_file], check=True)
-            run(["git", "-C", self.repo_path, "commit", "-m", f"Remove authorized user {user_id}"], check=True)
-            run(["git", "-C", self.repo_path, "push", "origin", self.branch], check=True)
-            self.authorized_users.discard(user_id)
-            logger.info("Removed authorized user: %s", user_id)
-            return True
+            with open(authorized_users_file, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+            
+            new_lines = []
+            user_removed = False
+            for line in lines:
+                if line.strip() != str(user_id):
+                    new_lines.append(line)
+                else:
+                    user_removed = True
+            
+            if not user_removed:
+                return True  # user not in file
+            
+            # Write back without the user
+            with open(authorized_users_file, "w", encoding="utf-8") as f:
+                f.writelines(new_lines)
+            
+            # Commit and push the change
+            success = self.commit_and_push("authorized_users.txt", 
+                                         "".join(new_lines), 
+                                         f"Remove authorized user {user_id}")
+            if success:
+                self.authorized_users.discard(user_id)
+                logger.info("Removed authorized user: %s", user_id)
+                return True
+            else:
+                return False
         except Exception as e:
             logger.error("Failed to remove authorized user: %s", e)
             return False
+
+git = GitHandler(GIT_REPO_URL)
 
 class CoinSystem:
     def __init__(self, git_handler):
@@ -230,8 +332,12 @@ class CoinSystem:
 
     def _load_coins_data(self):
         coins_path = os.path.join(self.git.repo_path, self.coins_file)
-        with open(coins_path, "r", encoding="utf-8") as f:
-            return json.load(f)
+        try:
+            with open(coins_path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            logger.error("Error loading coins data: %s", e)
+            return {"coins": {}, "transactions": [], "total_mined": 0}
 
     def _save_coins_data(self, data):
         coins_path = os.path.join(self.git.repo_path, self.coins_file)
@@ -329,7 +435,6 @@ class CoinSystem:
             "total_transactions": len(data["transactions"])
         }
 
-git = GitHandler(GIT_REPO_URL)
 coin_system = CoinSystem(git)
 
 # --- בדיקת הרשאה ---
@@ -344,45 +449,59 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if is_authorized(user_id):
         balance = coin_system.get_balance(user_id)
+        keyboard = [
+            [InlineKeyboardButton("🎓 על האקדמיה", callback_data="about_academy")],
+            [InlineKeyboardButton("🪙 מצב ארנק", callback_data="check_balance")],
+            [InlineKeyboardButton("🤖 שאל את AI", callback_data="ask_ai")],
+            [InlineKeyboardButton("📁 תיקיות אישיות", callback_data="personal_folders")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
         await update.message.reply_text(
             f"👋 שלום! אני בוט הלימוד שלך.\n"
             f"💰 מטבעות בארנק: {balance}\n\n"
-            "פקודות זמינות:\n"
-            "/start - הודעה זו\n"
-            "/help - עזרה\n"
-            "/gitstatus - מצב הריפו\n"
-            "/myfolder - פתיחת תיקיה אישית\n"
-            "/balance - מצב ארנק\n"
-            "/coins - ניהול מטבעות (למנהלים)\n\n"
-            "שלח טקסט רגיל ואשמור אותו בתיקיה האישית שלך."
+            "🏫 **ברוך הבא לאקדמיה להשכלה גבוהה!**\n\n"
+            "פה תוכל:\n"
+            "• ללמוד תחומים חדשים עם AI\n"
+            "• לנהל את החומר הלימודי שלך\n"
+            "• לקבל תגמולים במטבעות\n"
+            "• להתפתח מקצועית\n\n"
+            "השתמש בכפתורים למטה לניווט:",
+            reply_markup=reply_markup
         )
     else:
         keyboard = [
-            [InlineKeyboardButton("📨 בקש גישה + תשלום", callback_data="request_access")],
-            [InlineKeyboardButton("💳 שלחתי תשלום - אישור", callback_data="confirm_payment")]
+            [InlineKeyboardButton("🎓 למה להירשם?", callback_data="why_join")],
+            [InlineKeyboardButton("💳 רוצה להצטרף - תשלום", callback_data="request_access")],
+            [InlineKeyboardButton("📞 יצירת קשר", callback_data="contact_info")]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         await update.message.reply_text(
+            "🏫 **אקדמיה להשכלה גבוהה - SLH Academia**\n\n"
             "❌ אין לך הרשאה להשתמש בבוט זה.\n\n"
             "💵 עלות גישה: 444 ש\"ח\n\n"
-            "אם אתה תלמיד, אתה יכול לבקש גישה לאחר תשלום:\n"
-            "1. שלח 444 ש\"ח\n"
-            "2. לחץ על 'שלחתי תשלום'\n"
-            "3. שלח צילום מסך של התשלום\n"
-            "4. המנהל יאשר את הגישה",
+            "🎯 **מה תקבל לאחר הרישום:**\n"
+            "• גישה לפורטל למידה מתקדם\n"
+            "• ליווי AI אישי ללמידה\n"
+            "• תיקיות לימוד אישיות\n"
+            "• מערכת תגמולים במטבעות\n"
+            "• קהילת לומדים פעילה\n\n"
+            "לחץ על 'למה להירשם?' לפרטים נוספים:",
             reply_markup=reply_markup
         )
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_authorized(update.effective_user.id):
         return
+    
     await update.message.reply_text(
-        "📖 עזרה:\n\n"
+        "📖 **עזרה - אקדמיה להשכלה גבוהה:**\n\n"
         "• שלח טקסט רגיל - יישמר בתיקיה האישית שלך\n"
         "• /gitstatus - מציג את הקומיטים האחרונים\n"
         "• /myfolder - פותח תיקיה אישית חדשה\n"
         "• /balance - מצב מטבעות בארנק\n"
-        "• /transactions - היסטוריית עסקאות\n"
+        "• /ask - שאל שאלה את ה-AI\n"
+        "• /subjects - ניהול תחומי הלימוד\n"
         "• כל השינויים נשמרים אוטומטית ב-Git"
     )
 
@@ -403,7 +522,7 @@ async def myfolder_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_folder = f"students/{user.id}"
     welcome_file = f"{user_folder}/welcome.txt"
     
-    welcome_content = f"""ברוך הבא לתיקיה האישית שלך!
+    welcome_content = f"""ברוך הבא לתיקיה האישית שלך באקדמיה!
 
 מידע תלמיד:
 • שם: {user.first_name} {user.last_name or ''}
@@ -416,15 +535,28 @@ async def myfolder_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 • שאלות
 • פרויקטים
 • סיכומים
+• מטלות
+• פרויקטים אישיים
 
 שלח טקסט רגיל ואשמור אותו כאן!
+
+🎓 אקדמיה להשכלה גבוהה - SLH Academia
 """
     
     ok = git.commit_and_push(welcome_file, welcome_content, f"Create personal folder for {user.first_name} ({user.id})")
     if ok:
-        await update.message.reply_text(f"✅ תיקיה אישית נוצרה: {user_folder}/\n\nכעת תוכל לשלוח טקסט ואשמור אותו בתיקיה שלך.")
+        await update.message.reply_text(
+            f"✅ תיקיה אישית נוצרה: {user_folder}/\n\n"
+            f"🎓 **אקדמיה להשכלה גבוהה**\n"
+            f"כעת תוכל לשלוח טקסט ואשמור אותו בתיקיה שלך.\n\n"
+            f"💡 **טיפ:** אתה יכול ליצור תיקיות משנה לפי נושאים:\n"
+            f"• {user_folder}/programming/\n"
+            f"• {user_folder}/mathematics/\n"
+            f"• {user_folder}/projects/\n"
+            f"וכו..."
+        )
     else:
-        await update.message.reply_text("❌ שגיאה ביצירת תיקיה אישית. בדוק לוגים.")
+        await update.message.reply_text("❌ שגיאה ביצירת תיקיה אישית. נסה שוב מאוחר יותר.")
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_authorized(update.effective_user.id):
@@ -440,6 +572,27 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Check if this is a payment confirmation with photo
     if context.user_data.get('waiting_for_payment_proof'):
         # This will be handled by the photo handler
+        return
+    
+    # Check if waiting for AI question
+    if context.user_data.get('waiting_for_ai_question'):
+        await update.message.reply_text("🤖 AI מעבד את השאלה שלך...")
+        response = ai_service.ask_openai(text)
+        await update.message.reply_text(f"🤖 **תשובת AI:**\n\n{response}")
+        
+        # Save AI conversation
+        user_folder = f"students/{user.id}"
+        ts = datetime.datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        filename = f"{user_folder}/ai_conversation_{ts}.txt"
+        
+        content = f"""שיחת AI:
+שאלה: {text}
+תשובה: {response}
+תאריך: {datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}
+"""
+        git.commit_and_push(filename, content, f"AI conversation for {user.first_name}")
+        
+        context.user_data['waiting_for_ai_question'] = False
         return
     
     # יצירת תיקיית student אם לא קיימת
@@ -461,9 +614,15 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ok = git.commit_and_push(filename, content, commit_message)
     
     if ok:
-        await update.message.reply_text(f"✅ נשמר בהצלחה!\n📁 תיקיה: {user_folder}/\n📄 קובץ: note_{ts}.txt")
+        await update.message.reply_text(
+            f"✅ נשמר בהצלחה!\n"
+            f"📁 תיקיה: {user_folder}/\n"
+            f"📄 קובץ: note_{ts}.txt\n\n"
+            f"🎓 **אקדמיה להשכלה גבוהה**\n"
+            f"החומר הלימודי שלך נשמר בצורה מאובטחת."
+        )
     else:
-        await update.message.reply_text("❌ שגיאה בשמירה. בדוק לוגים.")
+        await update.message.reply_text("❌ שגיאה בשמירה. נסה שוב מאוחר יותר.")
 
 # --- Coin System Commands ---
 async def balance_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -474,8 +633,8 @@ async def balance_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     balance = coin_system.get_balance(user_id)
     transactions = coin_system.get_transaction_history(user_id, 5)
     
-    message = f"💰 מצב ארנק:\n\nמטבעות: {balance}\n\n"
-    message += "🔗 עסקאות אחרונות:\n"
+    message = f"💰 **מצב ארנק - אקדמיה להשכלה גבוהה**\n\nמטבעות: {balance}\n\n"
+    message += "🔗 **עסקאות אחרונות:**\n"
     
     if transactions:
         for tx in transactions:
@@ -488,6 +647,9 @@ async def balance_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     message += f"📥 +{tx['amount']} - {tx['reason']}\n"
     else:
         message += "אין עסקאות עדיין\n"
+    
+    message += "\n🎓 **המטבעות שלנו:**\n"
+    message += "• ניתן להמיר לשיעורים פרטיים\n• ניתן לקבל הנחות על קורסים\n• מעניקים גישה לתוכן בלעדי"
     
     await update.message.reply_text(message)
 
@@ -504,12 +666,27 @@ async def coins_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     stats = coin_system.get_system_stats()
     await update.message.reply_text(
-        f"🪙 ניהול מטבעות - מנהל\n\n"
-        f"📈 סטטיסטיקות:\n"
+        f"🪙 **ניהול מטבעות - אקדמיה**\n\n"
+        f"📈 **סטטיסטיקות:**\n"
         f"• משתמשים: {stats['total_users']}\n"
         f"• מטבעות שכורים: {stats['total_mined']}\n"
         f"• עסקאות: {stats['total_transactions']}",
         reply_markup=reply_markup
+    )
+
+async def ask_ai_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_authorized(update.effective_user.id):
+        return
+    
+    context.user_data['waiting_for_ai_question'] = True
+    await update.message.reply_text(
+        "🤖 **AI Assistant - אקדמיה להשכלה גבוהה**\n\n"
+        "שלח לי שאלה ואעזור לך עם:\n"
+        "• הסברים בתחומי הלימוד\n"
+        "• פתרון תרגילים\n"
+        "• הנחיה בפרויקטים\n"
+        "• תשובות לשאלות כלליות\n\n"
+        "💡 **טיפ:** שאל שאלות ספציפיות לתחומי העניין שלך!"
     )
 
 # --- Payment and Access Request System ---
@@ -520,63 +697,287 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
     data = query.data
 
-    if data == "request_access":
+    if data == "why_join":
+        # Show benefits of joining
+        benefits_text = (
+            "🎓 **למה להצטרף לאקדמיה שלנו?**\n\n"
+            "✅ **יתרונות בלעדיים:**\n"
+            "• פורטל למידה מתקדם עם AI\n"
+            "• תיקיות לימוד אישיות\n"
+            "• מערכת תגמולים במטבעות\n"
+            "• ליווי צמוד של מנחים\n"
+            "• קהילת לומדים תומכת\n"
+            "• גישה לחומרים בלעדיים\n\n"
+            "📚 **תחומי לימוד:**\n"
+            "• תכנות ומדעי המחשב\n"
+            "• מתמטיקה וסטטיסטיקה\n"
+            "• מדעי הנתונים\n"
+            "• בינה מלאכותית\n"
+            "• וכל תחום שתרצה!\n\n"
+            "💼 **יתרונות תעסוקתיים:**\n"
+            "• הכנה לראיונות עבודה\n"
+            "• בניית תיק פרויקטים\n"
+            "• פיתוח מיומנויות מבוקשות\n"
+            "• רשת קשרים מקצועית\n\n"
+            "💰 **מערכת המטבעות:**\n"
+            "• earn coins for achievements\n"
+            "• redeem for private lessons\n"
+            "• get course discounts\n"
+            "• access exclusive content"
+        )
+        
+        keyboard = [
+            [InlineKeyboardButton("💳 אני מעוניין - תשלום", callback_data="request_access")],
+            [InlineKeyboardButton("📞 יצירת קשר", callback_data="contact_info")],
+            [InlineKeyboardButton("🔙 חזרה", callback_data="back_to_start")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(benefits_text, reply_markup=reply_markup)
+
+    elif data == "request_access":
         # User requests access - show payment instructions
         payment_info = (
-            "💵 תשלום עבור גישה לבוט:\n\n"
+            "💵 **תשלום עבור גישה לאקדמיה**\n\n"
             "סכום: 444 ש\"ח\n\n"
-            "אחרי התשלום:\n"
+            "🏦 **פרטים להעברה:**\n"
+            "• בנק: [בנק שלך]\n"
+            "• סניף: [סניף]\n"
+            "• חשבון: [מספר חשבון]\n"
+            "• שם: [שם החשבון]\n\n"
+            "📋 **אחרי התשלום:**\n"
             "1. לחץ על 'שלחתי תשלום'\n"
             "2. שלח צילום מסך של ההעברה\n"
-            "3. המנהל יאשר את הגישה\n\n"
-            "📧 לשאלות: פנה למנהל"
+            "3. המנהל יאשר את הגישה תוך 24 שעות\n"
+            "4. תקבל קישור לקבוצה ופרטי כניסה\n\n"
+            "📧 **לשאלות:** @Osif83"
         )
         
         keyboard = [
             [InlineKeyboardButton("💳 שלחתי תשלום - אישור", callback_data="confirm_payment")],
+            [InlineKeyboardButton("📞 יצירת קשר", callback_data="contact_info")],
             [InlineKeyboardButton("🔙 חזרה", callback_data="back_to_start")]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         await query.edit_message_text(payment_info, reply_markup=reply_markup)
 
+    elif data == "contact_info":
+        contact_text = (
+            "📞 **יצירת קשר - אקדמיה להשכלה גבוהה**\n\n"
+            "👤 **מנהל האקדמיה:** Osif Ungar\n"
+            "📱 **טלגרם:** @Osif83\n"
+            "📧 **אימייל:** osif@slh-academia.com\n\n"
+            "💬 **שאלות לפני רישום?**\n"
+            "מוזמן ליצור קשר לכל שאלה!\n\n"
+            "🕒 **שעות פעילות:**\n"
+            "א'-ה' 09:00-18:00\n"
+            "ו' 09:00-13:00"
+        )
+        
+        keyboard = [
+            [InlineKeyboardButton("💳 אני מעוניין - תשלום", callback_data="request_access")],
+            [InlineKeyboardButton("🔙 חזרה", callback_data="back_to_start")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(contact_text, reply_markup=reply_markup)
+
     elif data == "confirm_payment":
         # User confirms payment - ask for photo proof
         context.user_data['waiting_for_payment_proof'] = True
         await query.edit_message_text(
-            "📸 שלח צילום מסך של התשלום כרגע.\n\n"
-            "התמונה תישלח למנהל לאישור."
+            "📸 **שלח צילום מסך של התשלום**\n\n"
+            "אנא שלח כעת צילום מסך של ההעברה הבנקאית.\n"
+            "התמונה תישלח למנהל לאישור.\n\n"
+            "💡 **טיפ:** ודא שהצילום כולל:\n"
+            "• שם השולח\n"
+            "• סכום ההעברה\n"
+            "• תאריך ההעברה\n"
+            "• פרטי החשבון"
+        )
+
+    elif data == "about_academy":
+        academy_info = (
+            "🏫 **אקדמיה להשכלה גבוהה - SLH Academia**\n\n"
+            "🎯 **המשימה שלנו:**\n"
+            "לסנגר השכלה גבוהה איכותית\n"
+            "באמצעות טכנולוגיה מתקדמת\n\n"
+            "💡 **מה אנחנו מציעים:**\n"
+            "• למידה מותאמת אישית עם AI\n"
+            "• תוכניות לימוד גמישות\n"
+            "• קהילת לומדים תומכת\n"
+            "• פיתוח כישורים מעשיים\n\n"
+            "🚀 **השיטה שלנו:**\n"
+            "1. אבחון תחומי עניין\n"
+            "2. בניית תוכנית לימודים\n"
+            "3. ליווי צמוד עם AI\n"
+            "4. תיעוד והתקדמות\n"
+            "5. תגמול והכרה\n\n"
+            "🎓 **הצטרף לקהילת הלומדים שלנו!**"
+        )
+        
+        keyboard = [
+            [InlineKeyboardButton("🤖 שאל את AI", callback_data="ask_ai")],
+            [InlineKeyboardButton("🪙 מצב ארנק", callback_data="check_balance")],
+            [InlineKeyboardButton("📁 תיקיות אישיות", callback_data="personal_folders")],
+            [InlineKeyboardButton("🔙 חזרה", callback_data="back_to_start")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(academy_info, reply_markup=reply_markup)
+
+    elif data == "ask_ai":
+        context.user_data['waiting_for_ai_question'] = True
+        await query.edit_message_text(
+            "🤖 **AI Assistant - אקדמיה להשכלה גבוהה**\n\n"
+            "שלח לי שאלה ואעזור לך עם:\n"
+            "• הסברים בתחומי הלימוד\n"
+            "• פתרון תרגילים\n"
+            "• הנחיה בפרויקטים\n"
+            "• תשובות לשאלות כלליות\n\n"
+            "💡 **טיפ:** שאל שאלות ספציפיות לתחומי העניין שלך!"
+        )
+
+    elif data == "check_balance":
+        user_id = query.from_user.id
+        balance = coin_system.get_balance(user_id)
+        transactions = coin_system.get_transaction_history(user_id, 3)
+        
+        message = f"💰 **מצב ארנק:**\n\nמטבעות: {balance}\n\n"
+        message += "🔗 **עסקאות אחרונות:**\n"
+        
+        if transactions:
+            for tx in transactions:
+                if tx["type"] == "mine":
+                    message += f"⛏️ +{tx['amount']} - {tx['reason']}\n"
+                elif tx["type"] == "transfer":
+                    if tx["from"] == str(user_id):
+                        message += f"📤 -{tx['amount']} - {tx['reason']}\n"
+                    else:
+                        message += f"📥 +{tx['amount']} - {tx['reason']}\n"
+        else:
+            message += "אין עסקאות עדיין\n"
+        
+        keyboard = [
+            [InlineKeyboardButton("🔙 חזרה", callback_data="back_to_start")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(message, reply_markup=reply_markup)
+
+    elif data == "personal_folders":
+        user_id = query.from_user.id
+        user_folder = f"students/{user_id}"
+        
+        message = (
+            f"📁 **התיקיות האישיות שלך**\n\n"
+            f"📂 תיקיה ראשית: `{user_folder}/`\n\n"
+            f"💡 **איך להשתמש:**\n"
+            f"• שלח טקסט רגיל - יישמר אוטומטית\n"
+            f"• השתמש ב-/myfolder ליצירת תיקיה\n"
+            f"• צור תיקיות משנה לפי נושאים\n\n"
+            f"🎯 **רעיונות לארגון:**\n"
+            f"• `{user_folder}/programming/`\n"
+            f"• `{user_folder}/mathematics/`\n"
+            f"• `{user_folder}/projects/`\n"
+            f"• `{user_folder}/notes/`\n\n"
+            f"🤖 **טיפ AI:** אתה יכול לבקש מה-AI לעזור\n"
+            f"בארגון החומר הלימודי שלך!"
+        )
+        
+        keyboard = [
+            [InlineKeyboardButton("📁 צור תיקיה חדשה", callback_data="create_folder")],
+            [InlineKeyboardButton("🤖 שאל AI על ארגון", callback_data="ask_ai_organization")],
+            [InlineKeyboardButton("🔙 חזרה", callback_data="back_to_start")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(message, reply_markup=reply_markup)
+
+    elif data == "create_folder":
+        user_id = query.from_user.id
+        user_folder = f"students/{user_id}"
+        welcome_file = f"{user_folder}/welcome.txt"
+        
+        welcome_content = f"""ברוך הבא לתיקיה האישית שלך באקדמיה!
+
+מידע תלמיד:
+• שם: {query.from_user.first_name} {query.from_user.last_name or ''}
+• שם משתמש: @{query.from_user.username or 'לא צוין'}
+• ID: {user_id}
+• תאריך יצירה: {datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}
+
+בתיקיה זו תוכל לשמור:
+• תרגילים
+• שאלות
+• פרויקטים
+• סיכומים
+• מטלות
+• פרויקטים אישיים
+
+🎓 אקדמיה להשכלה גבוהה - SLH Academia
+"""
+        
+        ok = git.commit_and_push(welcome_file, welcome_content, f"Create personal folder for {query.from_user.first_name} ({user_id})")
+        if ok:
+            await query.edit_message_text(
+                f"✅ **תיקיה אישית נוצרה!**\n\n"
+                f"📁 `{user_folder}/`\n\n"
+                f"🎓 כעת תוכל לשלוח טקסט ואשמור אותו בתיקיה שלך.\n"
+                f"💡 כל מה שתשלח יישמר אוטומטית."
+            )
+        else:
+            await query.edit_message_text("❌ שגיאה ביצירת תיקיה אישית. נסה שוב מאוחר יותר.")
+
+    elif data == "ask_ai_organization":
+        context.user_data['waiting_for_ai_question'] = True
+        await query.edit_message_text(
+            "🤖 **AI Assistant - ארגון למידה**\n\n"
+            "שאל את ה-AI לעזרה בארגון החומר הלימודי:\n"
+            "• 'איך לארגן תיקיות ללימוד תכנות?'\n"
+            "• 'מה מבנה התיקיות המומלץ למתמטיקה?'\n"
+            "• 'איך לנהל פרויקט programming?'\n"
+            "• 'טיפים לארגון חומר לימודי'\n\n"
+            "שלח את שאלתך now:"
         )
 
     elif data == "back_to_start":
         # Go back to start
         if is_authorized(user_id):
             balance = coin_system.get_balance(user_id)
+            keyboard = [
+                [InlineKeyboardButton("🎓 על האקדמיה", callback_data="about_academy")],
+                [InlineKeyboardButton("🪙 מצב ארנק", callback_data="check_balance")],
+                [InlineKeyboardButton("🤖 שאל את AI", callback_data="ask_ai")],
+                [InlineKeyboardButton("📁 תיקיות אישיות", callback_data="personal_folders")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
             await query.edit_message_text(
                 f"👋 שלום! אני בוט הלימוד שלך.\n"
                 f"💰 מטבעות בארנק: {balance}\n\n"
-                "פקודות זמינות:\n"
-                "/start - הודעה זו\n"
-                "/help - עזרה\n"
-                "/gitstatus - מצב הריפו\n"
-                "/myfolder - פתיחת תיקיה אישית\n"
-                "/balance - מצב ארנק\n"
-                "/coins - ניהול מטבעות (למנהלים)\n\n"
-                "שלח טקסט רגיל ואשמור אותו בתיקיה האישית שלך."
+                "🏫 **ברוך הבא לאקדמיה להשכלה גבוהה!**\n\n"
+                "פה תוכל:\n"
+                "• ללמוד תחומים חדשים עם AI\n"
+                "• לנהל את החומר הלימודי שלך\n"
+                "• לקבל תגמולים במטבעות\n"
+                "• להתפתח מקצועית\n\n"
+                "השתמש בכפתורים למטה לניווט:",
+                reply_markup=reply_markup
             )
         else:
             keyboard = [
-                [InlineKeyboardButton("📨 בקש גישה + תשלום", callback_data="request_access")],
-                [InlineKeyboardButton("💳 שלחתי תשלום - אישור", callback_data="confirm_payment")]
+                [InlineKeyboardButton("🎓 למה להירשם?", callback_data="why_join")],
+                [InlineKeyboardButton("💳 רוצה להצטרף - תשלום", callback_data="request_access")],
+                [InlineKeyboardButton("📞 יצירת קשר", callback_data="contact_info")]
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
             await query.edit_message_text(
+                "🏫 **אקדמיה להשכלה גבוהה - SLH Academia**\n\n"
                 "❌ אין לך הרשאה להשתמש בבוט זה.\n\n"
                 "💵 עלות גישה: 444 ש\"ח\n\n"
-                "אם אתה תלמיד, אתה יכול לבקש גישה לאחר תשלום:\n"
-                "1. שלח 444 ש\"ח\n"
-                "2. לחץ על 'שלחתי תשלום'\n"
-                "3. שלח צילום מסך של התשלום\n"
-                "4. המנהל יאשר את הגישה",
+                "🎯 **מה תקבל לאחר הרישום:**\n"
+                "• גישה לפורטל למידה מתקדם\n"
+                "• ליווי AI אישי ללמידה\n"
+                "• תיקיות לימוד אישיות\n"
+                "• מערכת תגמולים במטבעות\n"
+                "• קהילת לומדים פעילה\n\n"
+                "לחץ על 'למה להירשם?' לפרטים נוספים:",
                 reply_markup=reply_markup
             )
 
@@ -593,14 +994,23 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try:
                 await context.bot.send_message(
                     chat_id=target_user_id,
-                    text=f"🎉 הבקשה שלך אושרה! כעת אתה יכול להשתמש בבוט.\n\n"
-                         f"👥 הצטרף לקבוצה: {GROUP_LINK}\n\n"
-                         f"שלח /start להתחלה."
+                    text=f"🎉 **הבקשה שלך אושרה!**\n\n"
+                         f"🏫 **ברוך הבא לאקדמיה להשכלה גבוהה!**\n\n"
+                         f"👥 **הצטרף לקבוצה:** {GROUP_LINK}\n\n"
+                         f"📚 **מה עכשיו?**\n"
+                         f"• שלח /start להתחלה\n"
+                         f"• שאל את ה-AI שאלות\n"
+                         f"• התחל לשמור חומר לימודי\n"
+                         f"• צור תיקיות אישיות\n\n"
+                         f"🎓 **SLH Academia**"
                 )
             except Exception as e:
                 logger.error("Failed to notify user %s: %s", target_user_id, e)
 
-            await query.edit_message_text(f"✅ משתמש {target_user_id} אושר בהצלחה! נשלח קישור לקבוצה.")
+            await query.edit_message_text(
+                f"✅ **משתמש {target_user_id} אושר בהצלחה!**\n\n"
+                f"🏫 נשלח קישור לקבוצה והודעת ברכה."
+            )
         else:
             await query.edit_message_text("❌ שגיאה באישור המשתמש. בדוק לוגים.")
 
@@ -615,7 +1025,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             await context.bot.send_message(
                 chat_id=target_user_id,
-                text="❌ הבקשה שלך לגישה נדחתה. אם אתה חושב שזו טעות, פנה למנהל."
+                text="❌ **הבקשה שלך לגישה נדחתה.**\n\n"
+                     "אם אתה חושב שזו טעות, פנה למנהל @Osif83"
             )
         except Exception as e:
             logger.error("Failed to notify user %s: %s", target_user_id, e)
@@ -627,14 +1038,20 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         
         context.user_data['waiting_for_mine_amount'] = True
-        await query.edit_message_text("⛏️ כריתת מטבעות\n\nהזן כמות מטבעות לכרייה:")
+        await query.edit_message_text("⛏️ **כריתת מטבעות**\n\nהזן כמות מטבעות לכרייה:")
 
     elif data == "transfer_coins":
         if not is_admin(user_id):
             return
         
         context.user_data['waiting_for_transfer_details'] = True
-        await query.edit_message_text("🎁 העברת מטבעות\n\nהזן בפורמט: ID_משתמש,כמות,סיבה\n\nדוגמה: 123456789,10,תגמול על מטלה")
+        await query.edit_message_text(
+            "🎁 **העברת מטבעות**\n\n"
+            "הזן בפורמט: `ID_משתמש,כמות,סיבה`\n\n"
+            "**דוגמה:**\n"
+            "`123456789,10,תגמול על מטלה מצוינת`\n"
+            "`987654321,5,השתתפות פעילה בשיעור`"
+        )
 
     elif data == "coin_stats":
         if not is_admin(user_id):
@@ -642,7 +1059,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         stats = coin_system.get_system_stats()
         await query.edit_message_text(
-            f"📊 סטטיסטיקות מערכת מטבעות:\n\n"
+            f"📊 **סטטיסטיקות מערכת מטבעות:**\n\n"
             f"👥 משתמשים: {stats['total_users']}\n"
             f"⛏️ מטבעות שכורים: {stats['total_mined']}\n"
             f"🔗 עסקאות: {stats['total_transactions']}"
@@ -658,12 +1075,13 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # Notify admins about payment proof
     message_text = (
-        f"📸 בקשת גישה עם הוכחת תשלום:\n\n"
-        f"👤 שם: {user.first_name} {user.last_name or ''}\n"
-        f"📱 משתמש: @{user.username or 'לא צוין'}\n"
-        f"🆔 ID: {user.id}\n"
-        f"💵 סכום: 444 ש\"ח\n"
-        f"⏰ תאריך: {datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}"
+        f"📸 **בקשת גישה עם הוכחת תשלום**\n\n"
+        f"👤 **שם:** {user.first_name} {user.last_name or ''}\n"
+        f"📱 **משתמש:** @{user.username or 'לא צוין'}\n"
+        f"🆔 **ID:** {user.id}\n"
+        f"💵 **סכום:** 444 ש\"ח\n"
+        f"⏰ **תאריך:** {datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}\n\n"
+        f"🏫 **אקדמיה להשכלה גבוהה**"
     )
     
     keyboard = [
@@ -691,7 +1109,15 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.error("Failed to send message to admin %s: %s", admin_id, e)
 
     if sent_to_admins:
-        await update.message.reply_text("📸 תמונת התשלום נשלחה למנהל לאישור. תקבל הודעה כאשר תאושר.")
+        await update.message.reply_text(
+            "📸 **תמונת התשלום נשלחה למנהל לאישור.**\n\n"
+            "🏫 **אקדמיה להשכלה גבוהה**\n"
+            "תקבל הודעה כאשר תאושר, בדרך כלל תוך 24 שעות.\n\n"
+            "📚 **בינתיים, אתה יכול:**\n"
+            "• להתכונן ללימודים\n"
+            "• לחשוב על תחומי עניין\n"
+            "• להכין שאלות למנחה"
+        )
     else:
         await update.message.reply_text("❌ שגיאה בשליחת הבקשה. נסה שוב מאוחר יותר.")
     
@@ -716,7 +1142,7 @@ async def handle_admin_messages(update: Update, context: ContextTypes.DEFAULT_TY
             context.user_data['waiting_for_mine_amount'] = False
             context.user_data['waiting_for_mine_reason'] = True
             
-            await update.message.reply_text("📝 הזן סיבה לכרייה:")
+            await update.message.reply_text("📝 **הזן סיבה לכרייה:**\n\nלדוגמה: 'תגמול על מערכת חדשה'")
             
         except ValueError:
             await update.message.reply_text("❌ הכמות חייבת להיות מספר")
@@ -759,11 +1185,11 @@ async def handle_admin_messages(update: Update, context: ContextTypes.DEFAULT_TY
 # --- Flask endpoints ---
 @app.route("/", methods=["GET"])
 def index():
-    return "🚀 Telegram Git Bot is running!"
+    return "🚀 Telegram Git Bot - SLH Academia is running!"
 
 @app.route("/health", methods=["GET"])
 def health():
-    return "✅ Healthy"
+    return "✅ Healthy - SLH Academia"
 
 @app.route("/webhook/" + (BOT_TOKEN or ""), methods=["POST"])
 def webhook():
@@ -784,6 +1210,7 @@ def main():
     application.add_handler(CommandHandler("myfolder", myfolder_cmd))
     application.add_handler(CommandHandler("balance", balance_cmd))
     application.add_handler(CommandHandler("coins", coins_cmd))
+    application.add_handler(CommandHandler("ask", ask_ai_cmd))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_admin_messages))
     application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
