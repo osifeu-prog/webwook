@@ -2,6 +2,7 @@ import os
 import logging
 import subprocess
 import datetime
+from urllib.parse import urlparse
 from flask import Flask, request
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
@@ -10,11 +11,20 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 BOT_TOKEN = os.getenv("TELEGRAM_TOKEN") or os.getenv("BOT_TOKEN")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 GIT_REPO_URL = os.getenv("GIT_REPO_URL")
+GIT_TOKEN = os.getenv("GIT_TOKEN")
 GIT_BRANCH = os.getenv("GIT_BRANCH", "main")
 GIT_USERNAME = os.getenv("GIT_USERNAME", "telegram-bot")
 GIT_EMAIL = os.getenv("GIT_EMAIL", "bot@example.com")
 PORT = int(os.getenv("PORT", 8080))  # Railway uses 8080
-ADMIN_USER_IDS = [int(x.strip()) for x in os.getenv("ADMIN_USER_IDS", "").split(",") if x.strip()]
+
+# --- טעינת מנהלים - עם ערך ברירת מחדל אם לא הוגדר ---
+ADMIN_USER_IDS_STR = os.getenv("ADMIN_USER_IDS", "224223270")
+ADMIN_USER_IDS = []
+try:
+    ADMIN_USER_IDS = [int(x.strip()) for x in ADMIN_USER_IDS_STR.split(",") if x.strip()]
+except ValueError as e:
+    logging.error("Error parsing ADMIN_USER_IDS: %s", e)
+    ADMIN_USER_IDS = [224223270]  # fallback to default
 
 # --- בדיקה בסיסית ---
 if not BOT_TOKEN:
@@ -23,8 +33,8 @@ if not WEBHOOK_URL:
     raise SystemExit("❌ Missing required environment variable: WEBHOOK_URL.")
 if not GIT_REPO_URL:
     raise SystemExit("❌ Missing required environment variable: GIT_REPO_URL.")
-if not ADMIN_USER_IDS:
-    raise SystemExit("❌ Missing required environment variable: ADMIN_USER_IDS.")
+
+logging.info("Admin users: %s", ADMIN_USER_IDS)
 
 # --- לוגים ---
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -32,6 +42,17 @@ logger = logging.getLogger(__name__)
 
 # --- Flask עבור Railway ---
 app = Flask(__name__)
+
+def get_authenticated_repo_url(repo_url, token):
+    if token:
+        parsed = urlparse(repo_url)
+        # rebuild the URL with token
+        authenticated_url = f"https://{token}@{parsed.hostname}{parsed.path}"
+        return authenticated_url
+    else:
+        return repo_url
+
+authenticated_repo_url = get_authenticated_repo_url(GIT_REPO_URL, GIT_TOKEN)
 
 def run(cmd, **kwargs):
     logger.debug("RUN: %s", " ".join(cmd))
@@ -73,10 +94,9 @@ class GitHandler:
         authorized_users_file = os.path.join(self.repo_path, "authorized_users.txt")
         self.authorized_users = set()
         
-        # Add admin users first - they are always authorized
+        # Add admin users first
         for admin_id in ADMIN_USER_IDS:
             self.authorized_users.add(admin_id)
-            logger.info("Added admin user: %s", admin_id)
         
         # Load from file if exists
         if os.path.exists(authorized_users_file):
@@ -85,15 +105,11 @@ class GitHandler:
                     line = line.strip()
                     if line and not line.startswith("#"):
                         try:
-                            user_id = int(line)
-                            self.authorized_users.add(user_id)
-                            logger.info("Added authorized user from file: %s", user_id)
+                            self.authorized_users.add(int(line))
                         except ValueError:
                             logger.warning("Invalid user ID in authorized_users.txt: %s", line)
-        else:
-            logger.info("No authorized_users.txt file found")
         
-        logger.info("Loaded %d authorized users: %s", len(self.authorized_users), self.authorized_users)
+        logger.info("Loaded %d authorized users", len(self.authorized_users))
 
     def repo_ready(self):
         return os.path.isdir(os.path.join(self.repo_path, ".git"))
@@ -127,10 +143,6 @@ class GitHandler:
             return False
 
     def add_authorized_user(self, user_id):
-        # Don't add admins to the file - they are always authorized
-        if user_id in ADMIN_USER_IDS:
-            return True
-
         authorized_users_file = os.path.join(self.repo_path, "authorized_users.txt")
         
         # Ensure the file exists with header
@@ -170,10 +182,6 @@ class GitHandler:
             return False
 
     def remove_authorized_user(self, user_id):
-        # Don't remove admins - they are always authorized
-        if user_id in ADMIN_USER_IDS:
-            return False
-
         authorized_users_file = os.path.join(self.repo_path, "authorized_users.txt")
         
         if not os.path.exists(authorized_users_file):
@@ -210,7 +218,7 @@ class GitHandler:
             logger.error("Failed to remove authorized user: %s", e)
             return False
 
-git = GitHandler(GIT_REPO_URL)
+git = GitHandler(authenticated_repo_url)
 
 # --- בדיקת הרשאה ---
 def is_authorized(user_id):
@@ -434,15 +442,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await query.edit_message_text("❌ שגיאה בהסרת המשתמש. בדוק לוגים.")
 
-    elif data == "refresh_admin":
-        # Refresh admin panel
-        if not is_admin(user_id):
-            await query.edit_message_text("❌ רק מנהלים יכולים להשתמש בפנל זה.")
-            return
-        await admin_panel(query, context)
-
 # --- Admin commands ---
-async def admin_panel(query, context):
+async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        return
+    
     # Show current authorized users
     authorized_list = "\n".join([f"• {uid}" for uid in sorted(git.authorized_users) if uid not in ADMIN_USER_IDS])
     if not authorized_list:
@@ -462,20 +466,11 @@ async def admin_panel(query, context):
         if user_id not in ADMIN_USER_IDS:  # Don't show remove button for admins
             keyboard.append([InlineKeyboardButton(f"🚫 הסר משתמש {user_id}", callback_data=f"remove_{user_id}")])
     
-    keyboard.append([InlineKeyboardButton("🔄 רענן", callback_data="refresh_admin")])
+    if not keyboard:
+        keyboard.append([InlineKeyboardButton("🔄 רענן", callback_data="refresh_admin")])
     
     reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    if hasattr(query, 'edit_message_text'):
-        await query.edit_message_text(message, reply_markup=reply_markup)
-    else:
-        await query.message.reply_text(message, reply_markup=reply_markup)
-
-async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        return
-    
-    await admin_panel(update, context)
+    await update.message.reply_text(message, reply_markup=reply_markup)
 
 # --- Flask endpoints ---
 @app.route("/", methods=["GET"])
