@@ -1,26 +1,20 @@
-# Telegram Git Bot (Webhook) — Clean setup
+# Telegram Git Bot - בוט לימוד
 
-מטרה: בוט טלגרם ששומר הודעות בריפו באמצעות webhook.
+בוט טלגרם לשימור הודעות ותיעוד עבודה ב-Git repository.
 
-דרישות ב‑Railway (Settings → Variables):
-- BOT_TOKEN
-- WEBHOOK_URL (ה‑URL של השירות, כולל https ו‑/ בסוף)
-- GIT_REPO_URL
+## ✨ תכונות חדשות
 
-אופציונליים:
-- GIT_BRANCH (default: main)
-- GIT_USERNAME
-- GIT_EMAIL
-- SECRET_TOKEN (מומלץ לאבטחה)
+- **תיקיות אישיות** לכל תלמיד (`/myfolder`)
+- **תיעוד אוטומטי** של עבודה
+- **ניהול רשימת תלמידים** מורשים
+- **שמירת מטא-דאטה** על כל פעולה
 
-פריסה:
-1. העתק את הקבצים לפרויקט.
-2. העמס את משתני הסביבה ב‑Railway.
-3. Redeploy.
-4. Railway יריץ את השירות; ספריית git תתפס/תשוכפל ואחרי כן הודעות יישמרו וידחפו לריפו.
+## 🚀 פריסה ב-Railway
 
-פקודות:
-- /start
-- /help
-- /gitstatus
-- שלח טקסט רגיל — יישמר כקובץ ב־notes/.
+### משתני סביבה נדרשים:
+
+```env
+TELEGRAM_TOKEN=token_from_botfather
+WEBHOOK_URL=https://your-app.up.railway.app/
+GIT_REPO_URL=https://github.com/your-user/your-repo.git
+AUTHORIZED_USER_IDS=224223270,123456789
