@@ -3,8 +3,8 @@ import logging
 import subprocess
 import datetime
 from flask import Flask, request
-from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
 
 # --- קריאה למשתני סביבה שהוגדרו ב-Railway ---
 BOT_TOKEN = os.getenv("TELEGRAM_TOKEN") or os.getenv("BOT_TOKEN")
@@ -14,9 +14,7 @@ GIT_BRANCH = os.getenv("GIT_BRANCH", "main")
 GIT_USERNAME = os.getenv("GIT_USERNAME", "telegram-bot")
 GIT_EMAIL = os.getenv("GIT_EMAIL", "bot@example.com")
 PORT = int(os.getenv("PORT", 8080))  # Railway uses 8080
-
-# --- רשימת משתמשים מורשים (הוסף את ה-ID שלך ושל תלמידיך) ---
-AUTHORIZED_USER_IDS = [int(x.strip()) for x in os.getenv("AUTHORIZED_USER_IDS", "224223270").split(",") if x.strip()]
+ADMIN_USER_IDS = [int(x.strip()) for x in os.getenv("ADMIN_USER_IDS", "").split(",") if x.strip()]
 
 # --- בדיקה בסיסית ---
 if not BOT_TOKEN:
@@ -42,8 +40,10 @@ class GitHandler:
         self.repo_url = repo_url
         self.repo_path = repo_path
         self.branch = GIT_BRANCH
+        self.authorized_users = set()
         self._configure_git()
         self._prepare_repo()
+        self._load_authorized_users()
 
     def _configure_git(self):
         try:
@@ -66,6 +66,23 @@ class GitHandler:
             logger.info("Cloned repository")
         except subprocess.CalledProcessError as e:
             logger.error("Clone failed: %s", e)
+
+    def _load_authorized_users(self):
+        authorized_users_file = os.path.join(self.repo_path, "authorized_users.txt")
+        self.authorized_users = set()
+        if os.path.exists(authorized_users_file):
+            with open(authorized_users_file, "r") as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith("#"):
+                        try:
+                            self.authorized_users.add(int(line))
+                        except ValueError:
+                            logger.warning("Invalid user ID in authorized_users.txt: %s", line)
+        # Add admin users from environment variable
+        for admin_id in ADMIN_USER_IDS:
+            self.authorized_users.add(admin_id)
+        logger.info("Loaded %d authorized users", len(self.authorized_users))
 
     def repo_ready(self):
         return os.path.isdir(os.path.join(self.repo_path, ".git"))
@@ -98,26 +115,63 @@ class GitHandler:
             logger.error("Git operation failed: %s", e)
             return False
 
+    def add_authorized_user(self, user_id):
+        authorized_users_file = os.path.join(self.repo_path, "authorized_users.txt")
+        # Ensure the file exists
+        if not os.path.exists(authorized_users_file):
+            with open(authorized_users_file, "w") as f:
+                f.write("# Authorized users list\n")
+        # Check if user already exists
+        with open(authorized_users_file, "r") as f:
+            lines = f.readlines()
+        for line in lines:
+            if line.strip() == str(user_id):
+                return True  # already exists
+        # Add the user
+        with open(authorized_users_file, "a") as f:
+            f.write(f"{user_id}\n")
+        # Commit and push the change
+        try:
+            run(["git", "-C", self.repo_path, "add", authorized_users_file], check=True)
+            run(["git", "-C", self.repo_path, "commit", "-m", f"Add authorized user {user_id}"], check=True)
+            run(["git", "-C", self.repo_path, "push", "origin", self.branch], check=True)
+            self.authorized_users.add(user_id)
+            logger.info("Added authorized user: %s", user_id)
+            return True
+        except Exception as e:
+            logger.error("Failed to add authorized user: %s", e)
+            return False
+
 git = GitHandler(GIT_REPO_URL)
 
 # --- בדיקת הרשאה ---
 def is_authorized(user_id):
-    return user_id in AUTHORIZED_USER_IDS
+    return user_id in git.authorized_users
+
+def is_admin(user_id):
+    return user_id in ADMIN_USER_IDS
 
 # --- פקודות טלגרם ---
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_authorized(update.effective_user.id):
-        await update.message.reply_text("❌ אין לך הרשאה להשתמש בבוט זה.")
-        return
-    await update.message.reply_text(
-        "👋 שלום! אני בוט הלימוד שלך.\n\n"
-        "פקודות זמינות:\n"
-        "/start - הודעה זו\n"
-        "/help - עזרה\n"
-        "/gitstatus - מצב הריפו\n"
-        "/myfolder - פתיחת תיקיה אישית\n\n"
-        "שלח טקסט רגיל ואשמור אותו בתיקיה האישית שלך."
-    )
+    user_id = update.effective_user.id
+    if is_authorized(user_id):
+        await update.message.reply_text(
+            "👋 שלום! אני בוט הלימוד שלך.\n\n"
+            "פקודות זמינות:\n"
+            "/start - הודעה זו\n"
+            "/help - עזרה\n"
+            "/gitstatus - מצב הריפו\n"
+            "/myfolder - פתיחת תיקיה אישית\n\n"
+            "שלח טקסט רגיל ואשמור אותו בתיקיה האישית שלך."
+        )
+    else:
+        keyboard = [[InlineKeyboardButton("📨 בקש גישה", callback_data="request_access")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await update.message.reply_text(
+            "❌ אין לך הרשאה להשתמש בבוט זה.\n\n"
+            "אם אתה תלמיד, אתה יכול לבקש גישה על ידי לחיצה על הכפתור למטה.",
+            reply_markup=reply_markup
+        )
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_authorized(update.effective_user.id):
@@ -204,6 +258,71 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("❌ שגיאה בשמירה. בדוק לוגים.")
 
+# --- Handler for button presses ---
+async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    user_id = query.from_user.id
+    data = query.data
+
+    if data == "request_access":
+        # User requests access - notify admins
+        user = query.from_user
+        message_text = f"📨 בקשה לגישה:\n\nשם: {user.first_name}\nמשתמש: @{user.username or 'N/A'}\nID: {user.id}"
+        
+        keyboard = [
+            [
+                InlineKeyboardButton("✅ אשר", callback_data=f"approve_{user.id}"),
+                InlineKeyboardButton("❌ דחה", callback_data=f"reject_{user.id}")
+            ]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        # Send to all admins
+        for admin_id in ADMIN_USER_IDS:
+            try:
+                await context.bot.send_message(
+                    chat_id=admin_id,
+                    text=message_text,
+                    reply_markup=reply_markup
+                )
+            except Exception as e:
+                logger.error("Failed to send message to admin %s: %s", admin_id, e)
+
+        await query.edit_message_text("📨 בקשתך נשלחה למנהל. תקבל הודעה כאשר תאושר.")
+
+    elif data.startswith("approve_"):
+        # Admin approves a user
+        if not is_admin(user_id):
+            await query.edit_message_text("❌ רק מנהלים יכולים לאשר משתמשים.")
+            return
+
+        target_user_id = int(data.split("_")[1])
+        success = git.add_authorized_user(target_user_id)
+        if success:
+            # Notify the approved user
+            try:
+                await context.bot.send_message(
+                    chat_id=target_user_id,
+                    text="🎉 הבקשה שלך אושרה! כעת אתה יכול להשתמש בבוט. שלח /start להתחלה."
+                )
+            except Exception as e:
+                logger.error("Failed to notify user %s: %s", target_user_id, e)
+
+            await query.edit_message_text(f"✅ משתמש {target_user_id} אושר.")
+        else:
+            await query.edit_message_text("❌ שגיאה באישור המשתמש. בדוק לוגים.")
+
+    elif data.startswith("reject_"):
+        # Admin rejects a user
+        if not is_admin(user_id):
+            await query.edit_message_text("❌ רק מנהלים יכולים לדחות משתמשים.")
+            return
+
+        target_user_id = int(data.split("_")[1])
+        await query.edit_message_text(f"❌ משתמש {target_user_id} נדחה.")
+
 # --- Flask endpoints ---
 @app.route("/", methods=["GET"])
 def index():
@@ -231,6 +350,7 @@ def main():
     application.add_handler(CommandHandler("gitstatus", git_status))
     application.add_handler(CommandHandler("myfolder", myfolder_cmd))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    application.add_handler(CallbackQueryHandler(button_callback))
 
     # הגדרת webhook
     webhook_path = f"/webhook/{BOT_TOKEN}"
