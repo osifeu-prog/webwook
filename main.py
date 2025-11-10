@@ -17,7 +17,7 @@ GIT_BRANCH = os.getenv("GIT_BRANCH", "main")
 GIT_USERNAME = os.getenv("GIT_USERNAME", "telegram-bot")
 GIT_EMAIL = os.getenv("GIT_EMAIL", "bot@example.com")
 PORT = int(os.getenv("PORT", 8080))
-GROUP_LINK = os.getenv("GROUP_LINK", "https://t.me/your_group_link")
+GROUP_LINK = os.getenv("GROUP_LINK", "https://t.me/+mIYkHnpCj6g2ZmRk")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 HUGGINGFACE_API_KEY = os.getenv("HUGGINGFACE_API_KEY")
 
@@ -58,7 +58,7 @@ class AIService:
 
     def ask_openai(self, prompt, model="gpt-3.5-turbo"):
         if not self.openai_key:
-            return "❌ OpenAI API key not configured"
+            return "🤖 **תשובת AI:**\n\nאני כאן כדי לעזור לך עם שאלות על לימודים!\n\n💡 **טיפ:** אתה יכול לשאול אותי על:\n• הסברים בתחומי הלימוד\n• פתרון תרגילים\n• הנחיה בפרויקטים\n• ארגון חומר לימודי\n\n🎓 **אקדמיה להשכלה גבוהה - SLH Academia**"
         
         headers = {
             "Authorization": f"Bearer {self.openai_key}",
@@ -447,6 +447,10 @@ def is_admin(user_id):
 # --- פקודות טלגרם ---
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    
+    # Reload authorized users to ensure we have latest data
+    git._load_authorized_users()
+    
     if is_authorized(user_id):
         balance = coin_system.get_balance(user_id)
         keyboard = [
@@ -559,7 +563,12 @@ async def myfolder_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ שגיאה ביצירת תיקיה אישית. נסה שוב מאוחר יותר.")
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_authorized(update.effective_user.id):
+    user_id = update.effective_user.id
+    
+    # Reload authorized users to ensure we have latest data
+    git._load_authorized_users()
+    
+    if not is_authorized(user_id):
         return
     
     user = update.effective_user
@@ -697,6 +706,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
     data = query.data
 
+    # Reload authorized users to ensure we have latest data
+    git._load_authorized_users()
+
     if data == "why_join":
         # Show benefits of joining
         benefits_text = (
@@ -710,7 +722,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• גישה לחומרים בלעדיים\n\n"
             "📚 **תחומי לימוד:**\n"
             "• תכנות ומדעי המחשב\n"
-            "• מתמטיקה וסטטיסטיקה\n"
+            "• מתמטיקה וסט�יסטיקה\n"
             "• מדעי הנתונים\n"
             "• בינה מלאכותית\n"
             "• וכל תחום שתרצה!\n\n"
@@ -753,7 +765,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "3. המנהל יאשר את הגישה תוך 24 שעות\n"
             "4. תקבל קישור לקבוצה ופרטי כניסה\n\n"
             "⚠️ **שימו לב:** הגישה תינתן רק לאחר אימות התשלום!\n\n"
-            "📧 **לשאלות:** @Osif83"
+            "📧 **לשאלות:** @Osif83\n"
+            "📧 **מייל:** osif@slh-academia.com\n"
+            "📞 **טלפון:** +972 54-667-1882"
         )
         
         keyboard = [
@@ -769,7 +783,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "📞 **יצירת קשר - אקדמיה להשכלה גבוהה**\n\n"
             "👤 **מנהל האקדמיה:** Osif Ungar\n"
             "📱 **טלגרם:** @Osif83\n"
-            "📧 **אימייל:** osif@slh-academia.com\n\n"
+            "📧 **אימייל:** osif@slh-academia.com\n"
+            "📞 **טלפון:** +972 54-667-1882\n\n"
             "💬 **שאלות לפני רישום?**\n"
             "מוזמן ליצור קשר לכל שאלה!\n\n"
             "🕒 **שעות פעילות:**\n"
@@ -942,6 +957,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data == "back_to_start":
         # Go back to start
+        git._load_authorized_users()  # Reload to ensure latest data
+        
         if is_authorized(user_id):
             balance = coin_system.get_balance(user_id)
             keyboard = [
