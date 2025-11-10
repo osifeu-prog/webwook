@@ -23,6 +23,8 @@ if not WEBHOOK_URL:
     raise SystemExit("❌ Missing required environment variable: WEBHOOK_URL.")
 if not GIT_REPO_URL:
     raise SystemExit("❌ Missing required environment variable: GIT_REPO_URL.")
+if not ADMIN_USER_IDS:
+    raise SystemExit("❌ Missing required environment variable: ADMIN_USER_IDS.")
 
 # --- לוגים ---
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -70,19 +72,28 @@ class GitHandler:
     def _load_authorized_users(self):
         authorized_users_file = os.path.join(self.repo_path, "authorized_users.txt")
         self.authorized_users = set()
+        
+        # Add admin users first - they are always authorized
+        for admin_id in ADMIN_USER_IDS:
+            self.authorized_users.add(admin_id)
+            logger.info("Added admin user: %s", admin_id)
+        
+        # Load from file if exists
         if os.path.exists(authorized_users_file):
             with open(authorized_users_file, "r") as f:
                 for line in f:
                     line = line.strip()
                     if line and not line.startswith("#"):
                         try:
-                            self.authorized_users.add(int(line))
+                            user_id = int(line)
+                            self.authorized_users.add(user_id)
+                            logger.info("Added authorized user from file: %s", user_id)
                         except ValueError:
                             logger.warning("Invalid user ID in authorized_users.txt: %s", line)
-        # Add admin users from environment variable
-        for admin_id in ADMIN_USER_IDS:
-            self.authorized_users.add(admin_id)
-        logger.info("Loaded %d authorized users", len(self.authorized_users))
+        else:
+            logger.info("No authorized_users.txt file found")
+        
+        logger.info("Loaded %d authorized users: %s", len(self.authorized_users), self.authorized_users)
 
     def repo_ready(self):
         return os.path.isdir(os.path.join(self.repo_path, ".git"))
@@ -116,20 +127,36 @@ class GitHandler:
             return False
 
     def add_authorized_user(self, user_id):
+        # Don't add admins to the file - they are always authorized
+        if user_id in ADMIN_USER_IDS:
+            return True
+
         authorized_users_file = os.path.join(self.repo_path, "authorized_users.txt")
-        # Ensure the file exists
+        
+        # Ensure the file exists with header
         if not os.path.exists(authorized_users_file):
-            with open(authorized_users_file, "w") as f:
+            with open(authorized_users_file, "w", encoding="utf-8") as f:
                 f.write("# Authorized users list\n")
+                f.write("# Format: one user ID per line\n")
+                f.write("# Admins are automatically added from ADMIN_USER_IDS\n\n")
+        
         # Check if user already exists
-        with open(authorized_users_file, "r") as f:
+        with open(authorized_users_file, "r", encoding="utf-8") as f:
             lines = f.readlines()
+        
+        user_exists = False
         for line in lines:
             if line.strip() == str(user_id):
-                return True  # already exists
+                user_exists = True
+                break
+        
+        if user_exists:
+            return True  # already exists
+        
         # Add the user
-        with open(authorized_users_file, "a") as f:
+        with open(authorized_users_file, "a", encoding="utf-8") as f:
             f.write(f"{user_id}\n")
+        
         # Commit and push the change
         try:
             run(["git", "-C", self.repo_path, "add", authorized_users_file], check=True)
@@ -140,6 +167,47 @@ class GitHandler:
             return True
         except Exception as e:
             logger.error("Failed to add authorized user: %s", e)
+            return False
+
+    def remove_authorized_user(self, user_id):
+        # Don't remove admins - they are always authorized
+        if user_id in ADMIN_USER_IDS:
+            return False
+
+        authorized_users_file = os.path.join(self.repo_path, "authorized_users.txt")
+        
+        if not os.path.exists(authorized_users_file):
+            return True  # nothing to remove
+        
+        # Read all lines and remove the user
+        with open(authorized_users_file, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+        
+        new_lines = []
+        user_removed = False
+        for line in lines:
+            if line.strip() != str(user_id):
+                new_lines.append(line)
+            else:
+                user_removed = True
+        
+        if not user_removed:
+            return True  # user not in file
+        
+        # Write back without the user
+        with open(authorized_users_file, "w", encoding="utf-8") as f:
+            f.writelines(new_lines)
+        
+        # Commit and push the change
+        try:
+            run(["git", "-C", self.repo_path, "add", authorized_users_file], check=True)
+            run(["git", "-C", self.repo_path, "commit", "-m", f"Remove authorized user {user_id}"], check=True)
+            run(["git", "-C", self.repo_path, "push", "origin", self.branch], check=True)
+            self.authorized_users.discard(user_id)
+            logger.info("Removed authorized user: %s", user_id)
+            return True
+        except Exception as e:
+            logger.error("Failed to remove authorized user: %s", e)
             return False
 
 git = GitHandler(GIT_REPO_URL)
@@ -269,7 +337,13 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "request_access":
         # User requests access - notify admins
         user = query.from_user
-        message_text = f"📨 בקשה לגישה:\n\nשם: {user.first_name}\nמשתמש: @{user.username or 'N/A'}\nID: {user.id}"
+        message_text = (
+            f"📨 בקשה לגישה חדשה:\n\n"
+            f"👤 שם: {user.first_name} {user.last_name or ''}\n"
+            f"📱 משתמש: @{user.username or 'לא צוין'}\n"
+            f"🆔 ID: {user.id}\n"
+            f"⏰ תאריך: {datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}"
+        )
         
         keyboard = [
             [
@@ -280,6 +354,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup = InlineKeyboardMarkup(keyboard)
 
         # Send to all admins
+        sent_to_admins = False
         for admin_id in ADMIN_USER_IDS:
             try:
                 await context.bot.send_message(
@@ -287,10 +362,15 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     text=message_text,
                     reply_markup=reply_markup
                 )
+                sent_to_admins = True
+                logger.info("Access request sent to admin: %s", admin_id)
             except Exception as e:
                 logger.error("Failed to send message to admin %s: %s", admin_id, e)
 
-        await query.edit_message_text("📨 בקשתך נשלחה למנהל. תקבל הודעה כאשר תאושר.")
+        if sent_to_admins:
+            await query.edit_message_text("📨 בקשתך נשלחה למנהל. תקבל הודעה כאשר תאושר.")
+        else:
+            await query.edit_message_text("❌ שגיאה בשליחת הבקשה. נסה שוב מאוחר יותר.")
 
     elif data.startswith("approve_"):
         # Admin approves a user
@@ -310,7 +390,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception as e:
                 logger.error("Failed to notify user %s: %s", target_user_id, e)
 
-            await query.edit_message_text(f"✅ משתמש {target_user_id} אושר.")
+            await query.edit_message_text(f"✅ משתמש {target_user_id} אושר בהצלחה!")
         else:
             await query.edit_message_text("❌ שגיאה באישור המשתמש. בדוק לוגים.")
 
@@ -321,7 +401,81 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         target_user_id = int(data.split("_")[1])
+        # Notify the rejected user
+        try:
+            await context.bot.send_message(
+                chat_id=target_user_id,
+                text="❌ הבקשה שלך לגישה נדחתה. אם אתה חושב שזו טעות, פנה למנהל."
+            )
+        except Exception as e:
+            logger.error("Failed to notify user %s: %s", target_user_id, e)
+
         await query.edit_message_text(f"❌ משתמש {target_user_id} נדחה.")
+
+    elif data.startswith("remove_"):
+        # Admin removes a user
+        if not is_admin(user_id):
+            await query.edit_message_text("❌ רק מנהלים יכולים להסיר משתמשים.")
+            return
+
+        target_user_id = int(data.split("_")[1])
+        success = git.remove_authorized_user(target_user_id)
+        if success:
+            # Notify the removed user
+            try:
+                await context.bot.send_message(
+                    chat_id=target_user_id,
+                    text="🚫 הגישה שלך לבוט בוטלה. אם אתה חושב שזו טעות, פנה למנהל."
+                )
+            except Exception as e:
+                logger.error("Failed to notify user %s: %s", target_user_id, e)
+
+            await query.edit_message_text(f"✅ משתמש {target_user_id} הוסר בהצלחה!")
+        else:
+            await query.edit_message_text("❌ שגיאה בהסרת המשתמש. בדוק לוגים.")
+
+    elif data == "refresh_admin":
+        # Refresh admin panel
+        if not is_admin(user_id):
+            await query.edit_message_text("❌ רק מנהלים יכולים להשתמש בפנל זה.")
+            return
+        await admin_panel(query, context)
+
+# --- Admin commands ---
+async def admin_panel(query, context):
+    # Show current authorized users
+    authorized_list = "\n".join([f"• {uid}" for uid in sorted(git.authorized_users) if uid not in ADMIN_USER_IDS])
+    if not authorized_list:
+        authorized_list = "אין משתמשים מורשים כרגע."
+    
+    message = (
+        "👨‍💼 פנל ניהול:\n\n"
+        f"👥 משתמשים מורשים:\n{authorized_list}\n\n"
+        "פקודות ניהול:\n"
+        "/admin - הצג פנל זה\n"
+        "לחץ על 'הסר' ליד משתמש כדי להסירו"
+    )
+    
+    # Create inline keyboard with remove buttons for each user
+    keyboard = []
+    for user_id in sorted(git.authorized_users):
+        if user_id not in ADMIN_USER_IDS:  # Don't show remove button for admins
+            keyboard.append([InlineKeyboardButton(f"🚫 הסר משתמש {user_id}", callback_data=f"remove_{user_id}")])
+    
+    keyboard.append([InlineKeyboardButton("🔄 רענן", callback_data="refresh_admin")])
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    if hasattr(query, 'edit_message_text'):
+        await query.edit_message_text(message, reply_markup=reply_markup)
+    else:
+        await query.message.reply_text(message, reply_markup=reply_markup)
+
+async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        return
+    
+    await admin_panel(update, context)
 
 # --- Flask endpoints ---
 @app.route("/", methods=["GET"])
@@ -349,6 +503,7 @@ def main():
     application.add_handler(CommandHandler("help", help_cmd))
     application.add_handler(CommandHandler("gitstatus", git_status))
     application.add_handler(CommandHandler("myfolder", myfolder_cmd))
+    application.add_handler(CommandHandler("admin", admin_cmd))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     application.add_handler(CallbackQueryHandler(button_callback))
 
