@@ -8,6 +8,7 @@
 - **תיעוד אוטומטי** של עבודה
 - **ניהול רשימת תלמידים** מורשים
 - **שמירת מטא-דאטה** על כל פעולה
+- **מערכת בקשות גישה** - משתמשים יכולים לבקש גישה והמנהל יכול לאשר
 
 ## 🚀 פריסה ב-Railway
 
@@ -17,4 +18,4 @@
 TELEGRAM_TOKEN=token_from_botfather
 WEBHOOK_URL=https://your-app.up.railway.app/
 GIT_REPO_URL=https://github.com/your-user/your-repo.git
-AUTHORIZED_USER_IDS=224223270,123456789
+ADMIN_USER_IDS=224223270  # ID שלך כמנהל
