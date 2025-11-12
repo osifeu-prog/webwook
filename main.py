@@ -8,84 +8,171 @@ import requests
 from flask import Flask, request
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
+from typing import Dict, List, Optional, Any, Tuple
+import time
+from functools import wraps
+from prometheus_client import Counter, Histogram, Gauge, generate_latest
+from flask import Response
 
-# --- קריאה למשתני סביבה שהוגדרו ב-Railway ---
-BOT_TOKEN = os.getenv("TELEGRAM_TOKEN") or os.getenv("BOT_TOKEN")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")
-GIT_REPO_URL = os.getenv("GIT_REPO_URL")
-GIT_BRANCH = os.getenv("GIT_BRANCH", "main")
-GIT_USERNAME = os.getenv("GIT_USERNAME", "telegram-bot")
-GIT_EMAIL = os.getenv("GIT_EMAIL", "bot@example.com")
-PORT = int(os.getenv("PORT", 8080))
-GROUP_LINK = os.getenv("GROUP_LINK", "https://t.me/+mIYkHnpCj6g2ZmRk")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-HUGGINGFACE_API_KEY = os.getenv("HUGGINGFACE_API_KEY")
+# ===== CONFIGURATION =====
+class Config:
+    """ניהול תצורת המערכת"""
+    def __init__(self):
+        self.BOT_TOKEN = os.getenv("TELEGRAM_TOKEN") or os.getenv("BOT_TOKEN")
+        self.WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+        self.GIT_REPO_URL = os.getenv("GIT_REPO_URL")
+        self.GIT_BRANCH = os.getenv("GIT_BRANCH", "main")
+        self.GIT_USERNAME = os.getenv("GIT_USERNAME", "telegram-bot")
+        self.GIT_EMAIL = os.getenv("GIT_EMAIL", "bot@example.com")
+        self.PORT = int(os.getenv("PORT", 8080))
+        self.GROUP_LINK = os.getenv("GROUP_LINK", "https://t.me/+mIYkHnpCj6g2ZmRk")
+        self.OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+        self.HUGGINGFACE_API_KEY = os.getenv("HUGGINGFACE_API_KEY")
+        self.SECRET_TOKEN = os.getenv("SECRET_TOKEN")
+        
+        # Admin configuration
+        admin_ids_str = os.getenv("ADMIN_USER_IDS", "224223270")
+        self.ADMIN_USER_IDS = self._parse_admin_ids(admin_ids_str)
+        
+        self._validate_required_config()
+    
+    def _parse_admin_ids(self, admin_ids_str: str) -> List[int]:
+        """פרסור IDsof מנהלים"""
+        try:
+            return [int(x.strip()) for x in admin_ids_str.split(",") if x.strip()]
+        except ValueError as e:
+            logging.error("Error parsing ADMIN_USER_IDS: %s", e)
+            return [224223270]  # fallback
+    
+    def _validate_required_config(self):
+        """ולידציה של תצורה נדרשת"""
+        if not self.BOT_TOKEN:
+            raise SystemExit("❌ Missing required environment variable: BOT_TOKEN or TELEGRAM_TOKEN.")
+        if not self.WEBHOOK_URL:
+            raise SystemExit("❌ Missing required environment variable: WEBHOOK_URL.")
+        if not self.GIT_REPO_URL:
+            raise SystemExit("❌ Missing required environment variable: GIT_REPO_URL.")
 
-# --- טעינת מנהלים - עם ערך ברירת מחדל אם לא הוגדר ---
-ADMIN_USER_IDS_STR = os.getenv("ADMIN_USER_IDS", "224223270")
-ADMIN_USER_IDS = []
-try:
-    ADMIN_USER_IDS = [int(x.strip()) for x in ADMIN_USER_IDS_STR.split(",") if x.strip()]
-except ValueError as e:
-    logging.error("Error parsing ADMIN_USER_IDS: %s", e)
-    ADMIN_USER_IDS = [224223270]  # fallback to default
-
-# --- בדיקה בסיסית ---
-if not BOT_TOKEN:
-    raise SystemExit("❌ Missing required environment variable: BOT_TOKEN or TELEGRAM_TOKEN.")
-if not WEBHOOK_URL:
-    raise SystemExit("❌ Missing required environment variable: WEBHOOK_URL.")
-if not GIT_REPO_URL:
-    raise SystemExit("❌ Missing required environment variable: GIT_REPO_URL.")
-
-# --- לוגים מוגנים ---
+# ===== LOGGING SETUP =====
 class SecureFormatter(logging.Formatter):
+    """פורמטר לוגים מאובטח שמסתיר מידע רגיש"""
     def format(self, record):
-        # הסתרת טוקנים ומידע רגיש
         message = super().format(record)
-        if BOT_TOKEN:
-            message = message.replace(BOT_TOKEN, "BOT_TOKEN_" + BOT_TOKEN[-6:])
+        # הסתרת טוקנים ומידע רגיש בלוגים
+        sensitive_keys = ['BOT_TOKEN', 'OPENAI_API_KEY', 'HUGGINGFACE_API_KEY', 'SECRET_TOKEN']
+        for key in sensitive_keys:
+            value = os.getenv(key)
+            if value:
+                message = message.replace(value, f"{key}_REDACTED")
         return message
 
+# הגדרת לוגינג
 logging.basicConfig(
-    level=logging.INFO, 
+    level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s"
 )
 
-# החלת הפורמטר המוגן על כל הלוגרים
+# החלת הפורמטר המוגן
 for handler in logging.root.handlers:
     handler.setFormatter(SecureFormatter("%(asctime)s - %(levelname)s - %(message)s"))
 
 logger = logging.getLogger(__name__)
 
-# לוג התחלה בטוח
-logger.info("Bot starting with secure logging. Admin users: %s", ADMIN_USER_IDS)
+# ===== PROMETHEUS METRICS =====
+REQUEST_COUNT = Counter('http_requests_total', 'Total HTTP Requests', ['method', 'endpoint', 'status'])
+REQUEST_LATENCY = Histogram('http_request_duration_seconds', 'HTTP request latency', ['endpoint'])
+ACTIVE_USERS = Gauge('active_users', 'Number of active users')
+COIN_BALANCE = Gauge('coin_balance', 'User coin balance', ['user_id'])
+GIT_SYNC_STATUS = Gauge('git_sync_status', 'Git repository sync status')
+AI_REQUESTS = Counter('ai_requests_total', 'Total AI requests', ['model', 'status'])
 
-# --- Flask עבור Railway ---
-app = Flask(__name__)
+# ===== UTILITIES =====
+class CommandRunner:
+    """מנהל הרצת פקודות מערכת"""
+    
+    @staticmethod
+    def run(cmd: List[str], **kwargs) -> subprocess.CompletedProcess:
+        """הרצת פקודה עם לוגינג"""
+        logger.debug("RUN: %s", " ".join(cmd))
+        return subprocess.run(cmd, **kwargs)
 
-def run(cmd, **kwargs):
-    logger.debug("RUN: %s", " ".join(cmd))
-    return subprocess.run(cmd, **kwargs)
+class DateTimeUtils:
+    """כלי עזר לניהול תאריכים וזמנים"""
+    
+    @staticmethod
+    def get_timestamp() -> str:
+        """מחזיר טיימסטאמפ לפורמט YYYYMMDD_HHMMSS"""
+        return datetime.datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    
+    @staticmethod
+    def get_iso_timestamp() -> str:
+        """מחזיר תאריך בפורמט ISO"""
+        return datetime.datetime.utcnow().isoformat()
+    
+    @staticmethod
+    def get_formatted_datetime() -> str:
+        """מחזיר תאריך בפורמט קריא"""
+        return datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')
 
+class ValidationUtils:
+    """כלי עזר לוולידציה"""
+    
+    @staticmethod
+    def is_valid_user_id(user_id: Any) -> bool:
+        """וולידציה של ID משתמש"""
+        try:
+            return isinstance(user_id, int) and user_id > 0
+        except (ValueError, TypeError):
+            return False
+    
+    @staticmethod
+    def is_valid_amount(amount: Any) -> bool:
+        """וולידציה של כמות מטבעות"""
+        try:
+            return isinstance(amount, (int, float)) and amount > 0
+        except (ValueError, TypeError):
+            return False
+
+# ===== AI SERVICES =====
 class AIService:
-    def __init__(self):
-        self.openai_key = OPENAI_API_KEY
-        self.huggingface_key = HUGGINGFACE_API_KEY
-
-    def ask_openai(self, prompt, model="gpt-3.5-turbo"):
-        if not self.openai_key:
-            return "🤖 **תשובת AI:**\n\nאני כאן כדי לעזור לך עם שאלות על לימודים!\n\n💡 **טיפ:** אתה יכול לשאול אותי על:\n• הסברים בתחומי הלימוד\n• פתרון תרגילים\n• הנחיה בפרויקטים\n• ארגון חומר לימודי\n\n🎓 **אקדמיה להשכלה גבוהה - SLH Academia**"
+    """שירות AI מאוחד עם תמיכה במודלים שונים"""
+    
+    def __init__(self, config: Config):
+        self.config = config
+        self.models = {
+            'gpt-3.5-turbo': 'openai',
+            'gpt-4': 'openai',
+            'microsoft/DialoGPT-large': 'huggingface',
+            'facebook/blenderbot-400M-distill': 'huggingface'
+        }
+    
+    def ask_ai(self, prompt: str, model: str = "gpt-3.5-turbo") -> str:
+        """שליחת שאלה ל-AI עם בחירת מודל"""
+        model_type = self.models.get(model, 'openai')
+        
+        if model_type == 'openai':
+            return self._ask_openai(prompt, model)
+        else:
+            return self._ask_huggingface(prompt, model)
+    
+    def _ask_openai(self, prompt: str, model: str = "gpt-3.5-turbo") -> str:
+        """שימוש ב-OpenAI API"""
+        if not self.config.OPENAI_API_KEY:
+            return self._get_default_response()
         
         headers = {
-            "Authorization": f"Bearer {self.openai_key}",
+            "Authorization": f"Bearer {self.config.OPENAI_API_KEY}",
             "Content-Type": "application/json"
         }
         
         data = {
             "model": model,
-            "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0.7
+            "messages": [
+                {"role": "system", "content": "אתה עוזר AI לאקדמיה להשכלה גבוהה. ענה בעברית."},
+                {"role": "user", "content": prompt}
+            ],
+            "temperature": 0.7,
+            "max_tokens": 1000
         }
         
         try:
@@ -95,19 +182,30 @@ class AIService:
                 json=data,
                 timeout=30
             )
+            
+            AI_REQUESTS.labels(model=model, status=response.status_code).inc()
+            
             if response.status_code == 200:
                 return response.json()["choices"][0]["message"]["content"]
             else:
-                return f"❌ OpenAI API error: {response.status_code}"
+                logger.error("OpenAI API error: %s", response.status_code)
+                return f"❌ שגיאה ב-OpenAI API: {response.status_code}"
+                
+        except requests.exceptions.Timeout:
+            AI_REQUESTS.labels(model=model, status='timeout').inc()
+            return "❌ פסק זמן בבקשה ל-OpenAI. נסה שוב מאוחר יותר."
         except Exception as e:
-            return f"❌ OpenAI request failed: {str(e)}"
-
-    def ask_huggingface(self, prompt, model="microsoft/DialoGPT-large"):
-        if not self.huggingface_key:
+            AI_REQUESTS.labels(model=model, status='error').inc()
+            logger.error("OpenAI request failed: %s", str(e))
+            return f"❌ בקשת OpenAI נכשלה: {str(e)}"
+    
+    def _ask_huggingface(self, prompt: str, model: str = "microsoft/DialoGPT-large") -> str:
+        """שימוש ב-HuggingFace API"""
+        if not self.config.HUGGINGFACE_API_KEY:
             return "❌ HuggingFace API key not configured"
         
         headers = {
-            "Authorization": f"Bearer {self.huggingface_key}",
+            "Authorization": f"Bearer {self.config.HUGGINGFACE_API_KEY}",
             "Content-Type": "application/json"
         }
         
@@ -116,7 +214,8 @@ class AIService:
             "parameters": {
                 "max_length": 500,
                 "temperature": 0.7,
-                "do_sample": True
+                "do_sample": True,
+                "return_full_text": False
             }
         }
         
@@ -127,66 +226,112 @@ class AIService:
                 json=data,
                 timeout=30
             )
+            
+            AI_REQUESTS.labels(model=model, status=response.status_code).inc()
+            
             if response.status_code == 200:
                 result = response.json()
                 if isinstance(result, list) and len(result) > 0:
                     return result[0].get("generated_text", prompt)
                 return prompt
             else:
-                return f"❌ HuggingFace API error: {response.status_code}"
+                logger.error("HuggingFace API error: %s", response.status_code)
+                return f"❌ שגיאה ב-HuggingFace API: {response.status_code}"
+                
+        except requests.exceptions.Timeout:
+            AI_REQUESTS.labels(model=model, status='timeout').inc()
+            return "❌ פסק זמן בבקשה ל-HuggingFace. נסה שוב מאוחר יותר."
         except Exception as e:
-            return f"❌ HuggingFace request failed: {str(e)}"
+            AI_REQUESTS.labels(model=model, status='error').inc()
+            logger.error("HuggingFace request failed: %s", str(e))
+            return f"❌ בקשת HuggingFace נכשלה: {str(e)}"
+    
+    def _get_default_response(self) -> str:
+        """תגובת ברירת מחדל כאשר אין API key"""
+        return (
+            "🤖 **תשובת AI:**\n\n"
+            "אני כאן כדי לעזור לך עם שאלות על לימודים!\n\n"
+            "💡 **טיפ:** אתה יכול לשאול אותי על:\n"
+            "• הסברים בתחומי הלימוד\n• פתרון תרגילים\n"
+            "• הנחיה בפרויקטים\n• ארגון חומר לימודי\n\n"
+            "🎓 **אקדמיה להשכלה גבוהה - SLH Academia**"
+        )
 
-ai_service = AIService()
-
+# ===== GIT MANAGEMENT =====
 class GitHandler:
-    def __init__(self, repo_url, repo_path=".git_repo"):
-        self.repo_url = repo_url
+    """מנהל Git מתקדם עם caching ואופטימיזציות"""
+    
+    def __init__(self, config: Config, repo_path: str = ".git_repo"):
+        self.config = config
+        self.repo_url = config.GIT_REPO_URL
         self.repo_path = repo_path
-        self.branch = GIT_BRANCH
+        self.branch = config.GIT_BRANCH
         self.authorized_users = set()
+        self.last_sync = None
         self._configure_git()
         self._prepare_repo()
         self._load_authorized_users()
-
+    
     def _configure_git(self):
+        """הגדרות Git גלובליות"""
         try:
-            run(["git", "config", "--global", "user.name", GIT_USERNAME], check=True)
-            run(["git", "config", "--global", "user.email", GIT_EMAIL], check=True)
-            logger.info("Git configured: %s <%s>", GIT_USERNAME, GIT_EMAIL)
+            CommandRunner.run(["git", "config", "--global", "user.name", self.config.GIT_USERNAME], check=True)
+            CommandRunner.run(["git", "config", "--global", "user.email", self.config.GIT_EMAIL], check=True)
+            logger.info("Git configured: %s <%s>", self.config.GIT_USERNAME, self.config.GIT_EMAIL)
         except subprocess.CalledProcessError as e:
             logger.warning("Git config failed: %s", e)
-
+    
     def _prepare_repo(self):
+        """הכנת הריפוזיטורי - clone או pull"""
         if os.path.isdir(os.path.join(self.repo_path, ".git")):
-            try:
-                run(["git", "-C", self.repo_path, "pull", "origin", self.branch], check=True)
-                logger.info("Pulled latest changes")
-                return
-            except subprocess.CalledProcessError as e:
-                logger.warning("Pull failed: %s", e)
-                # Try to re-clone if pull fails
-                import shutil
-                try:
-                    shutil.rmtree(self.repo_path, ignore_errors=True)
-                except Exception as e:
-                    logger.warning("Failed to remove repo directory: %s", e)
-        
+            self._sync_repo()
+        else:
+            self._clone_repo()
+    
+    def _sync_repo(self):
+        """סנכרון הריפוזיטורי עם origin"""
         try:
-            run(["git", "clone", "-b", self.branch, self.repo_url, self.repo_path], check=True)
-            logger.info("Cloned repository")
+            CommandRunner.run(["git", "-C", self.repo_path, "pull", "origin", self.branch], check=True)
+            self.last_sync = DateTimeUtils.get_iso_timestamp()
+            logger.info("Repository synced successfully")
+            GIT_SYNC_STATUS.set(1)
+        except subprocess.CalledProcessError as e:
+            logger.warning("Pull failed: %s, attempting re-clone", e)
+            self._force_reclone()
+    
+    def _clone_repo(self):
+        """Clone של הריפוזיטורי"""
+        try:
+            CommandRunner.run(["git", "clone", "-b", self.branch, self.repo_url, self.repo_path], check=True)
+            self.last_sync = DateTimeUtils.get_iso_timestamp()
+            logger.info("Repository cloned successfully")
+            GIT_SYNC_STATUS.set(1)
         except subprocess.CalledProcessError as e:
             logger.error("Clone failed: %s", e)
-
+            GIT_SYNC_STATUS.set(0)
+            raise
+    
+    def _force_reclone(self):
+        """כופה clone מחדש של הריפוזיטורי"""
+        import shutil
+        try:
+            shutil.rmtree(self.repo_path, ignore_errors=True)
+            self._clone_repo()
+        except Exception as e:
+            logger.error("Force re-clone failed: %s", e)
+            GIT_SYNC_STATUS.set(0)
+            raise
+    
     def _load_authorized_users(self):
+        """טעינת משתמשים מורשים מהקובץ"""
         authorized_users_file = os.path.join(self.repo_path, "authorized_users.txt")
         self.authorized_users = set()
         
-        # Add admin users first
-        for admin_id in ADMIN_USER_IDS:
+        # הוספת מנהלים
+        for admin_id in self.config.ADMIN_USER_IDS:
             self.authorized_users.add(admin_id)
         
-        # Load from file if exists
+        # טעינה מהקובץ
         if os.path.exists(authorized_users_file):
             try:
                 with open(authorized_users_file, "r", encoding="utf-8") as f:
@@ -201,106 +346,147 @@ class GitHandler:
                 logger.error("Error reading authorized_users.txt: %s", e)
         
         logger.info("Loaded %d authorized users", len(self.authorized_users))
-
-    def repo_ready(self):
+        ACTIVE_USERS.set(len(self.authorized_users))
+    
+    def repo_ready(self) -> bool:
+        """בודק אם הריפוזיטורי מוכן"""
         return os.path.isdir(os.path.join(self.repo_path, ".git"))
-
-    def last_commits(self, n=5):
+    
+    def get_repo_status(self) -> Dict[str, Any]:
+        """מחזיר סטטוס מלא של הריפוזיטורי"""
         if not self.repo_ready():
-            return None
+            return {"status": "not_ready", "last_sync": self.last_sync}
+        
         try:
-            res = run(["git", "-C", self.repo_path, "log", "--oneline", f"-{n}"], capture_output=True, text=True, check=True)
-            return res.stdout.strip()
-        except subprocess.CalledProcessError:
-            return None
-
-    def commit_and_push(self, filename, content, message):
+            # בדיקת שינויים שלא commit
+            status_result = CommandRunner.run(
+                ["git", "-C", self.repo_path, "status", "--porcelain"], 
+                capture_output=True, text=True
+            )
+            has_changes = bool(status_result.stdout.strip())
+            
+            # commit אחרון
+            last_commit_result = CommandRunner.run(
+                ["git", "-C", self.repo_path, "log", "-1", "--pretty=format:%h - %s - %ad", "--date=short"],
+                capture_output=True, text=True
+            )
+            last_commit = last_commit_result.stdout.strip() if last_commit_result.returncode == 0 else "Unknown"
+            
+            return {
+                "status": "ready",
+                "last_sync": self.last_sync,
+                "has_changes": has_changes,
+                "last_commit": last_commit,
+                "branch": self.branch
+            }
+        except Exception as e:
+            logger.error("Error getting repo status: %s", e)
+            return {"status": "error", "error": str(e)}
+    
+    def commit_and_push(self, filename: str, content: str, message: str) -> bool:
+        """commit ו-push עם טיפול בשגיאות מתקדם"""
         if not self.repo_ready():
             logger.error("Repo not ready for commit")
             return False
         
         abs_path = os.path.join(self.repo_path, filename)
+        
         try:
+            # יצירת תיקיות אם צריך
             os.makedirs(os.path.dirname(abs_path), exist_ok=True)
+            
+            # כתיבה לקובץ
             with open(abs_path, "w", encoding="utf-8") as f:
                 f.write(content)
             
-            run(["git", "-C", self.repo_path, "add", filename], check=True)
-            status = run(["git", "-C", self.repo_path, "status", "--porcelain"], capture_output=True, text=True)
+            # git add
+            CommandRunner.run(["git", "-C", self.repo_path, "add", filename], check=True)
             
-            if status.stdout.strip() == "":
+            # בדיקה אם יש שינויים
+            status = CommandRunner.run(
+                ["git", "-C", self.repo_path, "status", "--porcelain"], 
+                capture_output=True, text=True
+            )
+            
+            if not status.stdout.strip():
                 logger.info("No changes to commit for %s", filename)
                 return True
             
-            run(["git", "-C", self.repo_path, "commit", "-m", message], check=True)
-            run(["git", "-C", self.repo_path, "push", "origin", self.branch], check=True)
+            # commit ו-push
+            CommandRunner.run(["git", "-C", self.repo_path, "commit", "-m", message], check=True)
+            CommandRunner.run(["git", "-C", self.repo_path, "push", "origin", self.branch], check=True)
+            
+            self.last_sync = DateTimeUtils.get_iso_timestamp()
             logger.info("Successfully committed and pushed: %s", filename)
             return True
-        except Exception as e:
+            
+        except subprocess.CalledProcessError as e:
             logger.error("Git operation failed for %s: %s", filename, e)
             return False
-
-    def add_authorized_user(self, user_id):
+        except Exception as e:
+            logger.error("Unexpected error in commit_and_push: %s", e)
+            return False
+    
+    def add_authorized_user(self, user_id: int) -> bool:
+        """הוספת משתמש מורשה"""
         authorized_users_file = os.path.join(self.repo_path, "authorized_users.txt")
         
-        # Ensure the file exists with header
+        # יצירת קובץ אם לא קיים
         if not os.path.exists(authorized_users_file):
             with open(authorized_users_file, "w", encoding="utf-8") as f:
-                f.write("# Authorized users list\n")
-                f.write("# Format: one user ID per line\n")
-                f.write("# Admins are automatically added from ADMIN_USER_IDS\n\n")
+                f.write("# Authorized users list\n# Format: one user ID per line\n# Admins are automatically added\n\n")
         
-        # Check if user already exists
-        user_exists = False
+        # בדיקה אם המשתמש כבר קיים
         try:
             with open(authorized_users_file, "r", encoding="utf-8") as f:
                 lines = f.readlines()
             
-            for line in lines:
-                if line.strip() == str(user_id):
-                    user_exists = True
-                    break
-        except Exception as e:
-            logger.error("Error reading authorized users file: %s", e)
-        
-        if user_exists:
-            logger.info("User %s already in authorized list", user_id)
-            self.authorized_users.add(user_id)
-            return True  # already exists
-        
-        # Add the user
-        try:
+            user_exists = any(line.strip() == str(user_id) for line in lines)
+            
+            if user_exists:
+                logger.info("User %s already in authorized list", user_id)
+                self.authorized_users.add(user_id)
+                ACTIVE_USERS.set(len(self.authorized_users))
+                return True
+            
+            # הוספת המשתמש
             with open(authorized_users_file, "a", encoding="utf-8") as f:
                 f.write(f"{user_id}\n")
             
-            # Commit and push the change
-            success = self.commit_and_push("authorized_users.txt", 
-                                         "".join(lines + [f"{user_id}\n"]), 
-                                         f"Add authorized user {user_id}")
+            # commit השינוי
+            success = self.commit_and_push(
+                "authorized_users.txt", 
+                "".join(lines + [f"{user_id}\n"]), 
+                f"Add authorized user {user_id}"
+            )
+            
             if success:
                 self.authorized_users.add(user_id)
+                ACTIVE_USERS.set(len(self.authorized_users))
                 logger.info("Added authorized user: %s", user_id)
                 return True
             else:
                 logger.error("Failed to commit authorized user addition")
                 return False
+                
         except Exception as e:
             logger.error("Failed to add authorized user: %s", e)
             return False
-
-    def remove_authorized_user(self, user_id):
+    
+    def remove_authorized_user(self, user_id: int) -> bool:
+        """הסרת משתמש מורשה"""
         authorized_users_file = os.path.join(self.repo_path, "authorized_users.txt")
         
         if not os.path.exists(authorized_users_file):
-            return True  # nothing to remove
+            return True
         
-        # Read all lines and remove the user
         try:
             with open(authorized_users_file, "r", encoding="utf-8") as f:
                 lines = f.readlines()
             
             new_lines = []
             user_removed = False
+            
             for line in lines:
                 if line.strip() != str(user_id):
                     new_lines.append(line)
@@ -308,49 +494,61 @@ class GitHandler:
                     user_removed = True
             
             if not user_removed:
-                return True  # user not in file
+                return True
             
-            # Write back without the user
+            # כתיבה מחדש ללא המשתמש
             with open(authorized_users_file, "w", encoding="utf-8") as f:
                 f.writelines(new_lines)
             
-            # Commit and push the change
-            success = self.commit_and_push("authorized_users.txt", 
-                                         "".join(new_lines), 
-                                         f"Remove authorized user {user_id}")
+            # commit השינוי
+            success = self.commit_and_push(
+                "authorized_users.txt", 
+                "".join(new_lines), 
+                f"Remove authorized user {user_id}"
+            )
+            
             if success:
                 self.authorized_users.discard(user_id)
+                ACTIVE_USERS.set(len(self.authorized_users))
                 logger.info("Removed authorized user: %s", user_id)
                 return True
             else:
                 return False
+                
         except Exception as e:
             logger.error("Failed to remove authorized user: %s", e)
             return False
 
-git = GitHandler(GIT_REPO_URL)
-
+# ===== COIN SYSTEM =====
 class CoinSystem:
-    def __init__(self, git_handler):
+    """מערכת מטבעות מתקדמת עם ניהול עסקאות"""
+    
+    def __init__(self, git_handler: GitHandler):
         self.git = git_handler
         self.coins_file = "coins/coins.json"
         self._ensure_coins_file()
-
+    
     def _ensure_coins_file(self):
-        """Ensure coins file exists with initial structure"""
+        """וידוא שקובץ המטבעות קיים"""
         coins_path = os.path.join(self.git.repo_path, self.coins_file)
         if not os.path.exists(coins_path):
             os.makedirs(os.path.dirname(coins_path), exist_ok=True)
             initial_data = {
                 "coins": {},
                 "transactions": [],
-                "total_mined": 0
+                "total_mined": 0,
+                "system_created": DateTimeUtils.get_iso_timestamp()
             }
             with open(coins_path, "w", encoding="utf-8") as f:
                 json.dump(initial_data, f, indent=2, ensure_ascii=False)
-            self.git.commit_and_push(self.coins_file, json.dumps(initial_data, indent=2), "Initialize coins system")
-
-    def _load_coins_data(self):
+            self.git.commit_and_push(
+                self.coins_file, 
+                json.dumps(initial_data, indent=2), 
+                "Initialize coins system"
+            )
+    
+    def _load_coins_data(self) -> Dict[str, Any]:
+        """טעינת נתוני מטבעות"""
         coins_path = os.path.join(self.git.repo_path, self.coins_file)
         try:
             with open(coins_path, "r", encoding="utf-8") as f:
@@ -358,17 +556,29 @@ class CoinSystem:
         except Exception as e:
             logger.error("Error loading coins data: %s", e)
             return {"coins": {}, "transactions": [], "total_mined": 0}
-
-    def _save_coins_data(self, data):
+    
+    def _save_coins_data(self, data: Dict[str, Any]) -> bool:
+        """שמירת נתוני מטבעות"""
         coins_path = os.path.join(self.git.repo_path, self.coins_file)
-        with open(coins_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
-        return self.git.commit_and_push(self.coins_file, json.dumps(data, indent=2), "Update coins data")
-
-    def mine_coins(self, admin_id, amount, reason):
-        """Admin mines new coins"""
-        if admin_id not in ADMIN_USER_IDS:
+        try:
+            with open(coins_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+            return self.git.commit_and_push(
+                self.coins_file, 
+                json.dumps(data, indent=2), 
+                "Update coins data"
+            )
+        except Exception as e:
+            logger.error("Error saving coins data: %s", e)
+            return False
+    
+    def mine_coins(self, admin_id: int, amount: int, reason: str) -> Tuple[bool, str]:
+        """כריית מטבעות חדשים - מנהלים בלבד"""
+        if admin_id not in self.git.config.ADMIN_USER_IDS:
             return False, "רק מנהלים יכולים לכרות מטבעות"
+        
+        if amount <= 0:
+            return False, "הכמות חייבת להיות חיובית"
         
         data = self._load_coins_data()
         transaction_id = str(uuid.uuid4())[:8]
@@ -380,11 +590,11 @@ class CoinSystem:
             "to": str(admin_id),
             "amount": amount,
             "reason": reason,
-            "timestamp": datetime.datetime.utcnow().isoformat(),
+            "timestamp": DateTimeUtils.get_iso_timestamp(),
             "admin": str(admin_id)
         }
         
-        # Update admin's balance
+        # עדכון יתרת המנהל
         if str(admin_id) not in data["coins"]:
             data["coins"][str(admin_id)] = 0
         data["coins"][str(admin_id)] += amount
@@ -392,16 +602,24 @@ class CoinSystem:
         data["transactions"].append(transaction)
         
         if self._save_coins_data(data):
+            COIN_BALANCE.labels(user_id=str(admin_id)).set(data["coins"][str(admin_id)])
             return True, f"✅ כריתת {amount} מטבעות הצליחה!\nמספר עסקה: {transaction_id}\nסיבה: {reason}"
         else:
             return False, "❌ שגיאה בשמירת כריתת המטבעות"
-
-    def transfer_coins(self, from_user_id, to_user_id, amount, reason):
-        """Transfer coins between users"""
+    
+    def transfer_coins(self, from_user_id: int, to_user_id: int, amount: int, reason: str) -> Tuple[bool, str]:
+        """העברת מטבעות בין משתמשים"""
+        if amount <= 0:
+            return False, "הכמות חייבת להיות חיובית"
+        
+        if from_user_id == to_user_id:
+            return False, "❌ לא ניתן להעביר מטבעות לעצמך"
+        
         data = self._load_coins_data()
         
-        # Check if sender has enough coins
-        if str(from_user_id) not in data["coins"] or data["coins"][str(from_user_id)] < amount:
+        # בדיקה אם לשולח יש מספיק מטבעות
+        if (str(from_user_id) not in data["coins"] or 
+            data["coins"][str(from_user_id)] < amount):
             return False, "❌ אין מספיק מטבעות בארנק"
         
         transaction_id = str(uuid.uuid4())[:8]
@@ -413,10 +631,10 @@ class CoinSystem:
             "to": str(to_user_id),
             "amount": amount,
             "reason": reason,
-            "timestamp": datetime.datetime.utcnow().isoformat()
+            "timestamp": DateTimeUtils.get_iso_timestamp()
         }
         
-        # Update balances
+        # עדכון יתרות
         data["coins"][str(from_user_id)] -= amount
         if str(to_user_id) not in data["coins"]:
             data["coins"][str(to_user_id)] = 0
@@ -424,17 +642,21 @@ class CoinSystem:
         data["transactions"].append(transaction)
         
         if self._save_coins_data(data):
+            COIN_BALANCE.labels(user_id=str(from_user_id)).set(data["coins"][str(from_user_id)])
+            COIN_BALANCE.labels(user_id=str(to_user_id)).set(data["coins"][str(to_user_id)])
             return True, f"✅ העברת {amount} מטבעות הצליחה!\nמספר עסקה: {transaction_id}\nסיבה: {reason}"
         else:
             return False, "❌ שגיאה בשמירת העברת המטבעות"
-
-    def get_balance(self, user_id):
-        """Get user's coin balance"""
+    
+    def get_balance(self, user_id: int) -> int:
+        """קבלת יתרת מטבעות"""
         data = self._load_coins_data()
-        return data["coins"].get(str(user_id), 0)
-
-    def get_transaction_history(self, user_id, limit=10):
-        """Get transaction history for user"""
+        balance = data["coins"].get(str(user_id), 0)
+        COIN_BALANCE.labels(user_id=str(user_id)).set(balance)
+        return balance
+    
+    def get_transaction_history(self, user_id: int, limit: int = 10) -> List[Dict]:
+        """היסטוריית עסקאות למשתמש"""
         data = self._load_coins_data()
         user_transactions = []
         
@@ -445,31 +667,158 @@ class CoinSystem:
                 break
         
         return user_transactions
-
-    def get_system_stats(self):
-        """Get system statistics"""
+    
+    def get_system_stats(self) -> Dict[str, Any]:
+        """סטטיסטיקות מערכת"""
         data = self._load_coins_data()
+        
+        # חישוב סכום מטבעות כולל
+        total_coins = sum(data["coins"].values())
+        
         return {
             "total_users": len(data["coins"]),
             "total_mined": data["total_mined"],
-            "total_transactions": len(data["transactions"])
+            "total_coins": total_coins,
+            "total_transactions": len(data["transactions"]),
+            "system_created": data.get("system_created", "Unknown")
         }
+    
+    def get_user_rankings(self, limit: int = 10) -> List[Tuple[int, int]]:
+        """דירוג משתמשים לפי כמות מטבעות"""
+        data = self._load_coins_data()
+        
+        # יצירת רשימת (user_id, balance) ממוינת
+        rankings = []
+        for user_id_str, balance in data["coins"].items():
+            if balance > 0:  # רק משתמשים עם מטבעות
+                rankings.append((int(user_id_str), balance))
+        
+        # מיון לפי כמות מטבעות (יורד)
+        rankings.sort(key=lambda x: x[1], reverse=True)
+        
+        return rankings[:limit]
 
-coin_system = CoinSystem(git)
+# ===== FLASK APP & MONITORING =====
+app = Flask(__name__)
 
-# --- בדיקת הרשאה ---
-def is_authorized(user_id):
-    return user_id in git.authorized_users
+# Initialize components
+config = Config()
 
-def is_admin(user_id):
-    return user_id in ADMIN_USER_IDS
+# Log startup with secure info
+logger.info("Bot starting with secure logging. Admin users: %s", config.ADMIN_USER_IDS)
 
-# --- פקודות טלגרם ---
+# Initialize services
+ai_service = AIService(config)
+git_handler = GitHandler(config)
+coin_system = CoinSystem(git_handler)
+
+# ===== MONITORING DECORATORS =====
+def monitor_requests(func):
+    """Decorator for monitoring HTTP requests"""
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        start_time = time.time()
+        
+        try:
+            response = func(*args, **kwargs)
+            status_code = getattr(response, 'status_code', 200)
+            REQUEST_COUNT.labels(method='GET', endpoint=func.__name__, status=status_code).inc()
+            return response
+        except Exception as e:
+            REQUEST_COUNT.labels(method='GET', endpoint=func.__name__, status=500).inc()
+            raise e
+        finally:
+            latency = time.time() - start_time
+            REQUEST_LATENCY.labels(endpoint=func.__name__).observe(latency)
+    
+    return wrapper
+
+# ===== FLASK ROUTES =====
+@app.route("/", methods=["GET"])
+@monitor_requests
+def index():
+    return "🚀 Telegram Git Bot - SLH Academia is running!"
+
+@app.route("/health", methods=["GET"])
+@monitor_requests
+def health():
+    return "✅ Healthy - SLH Academia"
+
+@app.route("/metrics", methods=["GET"])
+def metrics():
+    """Endpoint for Prometheus metrics"""
+    return Response(generate_latest(), mimetype='text/plain')
+
+@app.route("/health/detailed", methods=["GET"])
+@monitor_requests
+def detailed_health():
+    """בדיקת בריאות מפורטת"""
+    health_status = {
+        'status': 'healthy',
+        'timestamp': time.time(),
+        'checks': {}
+    }
+    
+    # Check Git repository
+    try:
+        repo_ready = git_handler.repo_ready()
+        health_status['checks']['git_repo'] = {
+            'status': 'healthy' if repo_ready else 'unhealthy',
+            'details': git_handler.get_repo_status()
+        }
+    except Exception as e:
+        health_status['checks']['git_repo'] = {
+            'status': 'unhealthy',
+            'error': str(e)
+        }
+    
+    # Check coin system
+    try:
+        coin_stats = coin_system.get_system_stats()
+        health_status['checks']['coin_system'] = {
+            'status': 'healthy',
+            'details': coin_stats
+        }
+    except Exception as e:
+        health_status['checks']['coin_system'] = {
+            'status': 'unhealthy',
+            'error': str(e)
+        }
+    
+    # Update overall status
+    unhealthy_checks = [
+        check for check in health_status['checks'].values() 
+        if check['status'] == 'unhealthy'
+    ]
+    
+    if unhealthy_checks:
+        health_status['status'] = 'unhealthy'
+    
+    return health_status
+
+@app.route("/webhook/" + (config.BOT_TOKEN or ""), methods=["POST"])
+def webhook():
+    if config.BOT_TOKEN:
+        application = Application.builder().token(config.BOT_TOKEN).build()
+        update = Update.de_json(request.get_json(), application.bot)
+        application.process_update(update)
+    return "OK"
+
+# ===== TELEGRAM BOT HANDLERS =====
+def is_authorized(user_id: int) -> bool:
+    """בדיקת הרשאות משתמש"""
+    return user_id in git_handler.authorized_users
+
+def is_admin(user_id: int) -> bool:
+    """בדיקה אם משתמש הוא מנהל"""
+    return user_id in config.ADMIN_USER_IDS
+
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """פקודת /start"""
     user_id = update.effective_user.id
     
-    # Reload authorized users to ensure we have the latest data
-    git._load_authorized_users()
+    # רענון רשימת משתמשים מורשים
+    git_handler._load_authorized_users()
     
     if is_authorized(user_id):
         balance = coin_system.get_balance(user_id)
@@ -477,7 +826,8 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("🎓 על האקדמיה", callback_data="about_academy")],
             [InlineKeyboardButton("🪙 מצב ארנק", callback_data="check_balance")],
             [InlineKeyboardButton("🤖 שאל את AI", callback_data="ask_ai")],
-            [InlineKeyboardButton("📁 תיקיות אישיות", callback_data="personal_folders")]
+            [InlineKeyboardButton("📁 תיקיות אישיות", callback_data="personal_folders")],
+            [InlineKeyboardButton("📊 סטטוס מערכת", callback_data="system_status")]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
@@ -515,30 +865,99 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """פקודת /help"""
     if not is_authorized(update.effective_user.id):
         return
     
-    await update.message.reply_text(
+    help_text = (
         "📖 **עזרה - אקדמיה להשכלה גבוהה:**\n\n"
-        "• שלח טקסט רגיל - יישמר בתיקיה האישית שלך\n"
-        "• /gitstatus - מציג את הקומיטים האחרונים\n"
-        "• /myfolder - פותח תיקיה אישית חדשה\n"
-        "• /balance - מצב מטבעות בארנק\n"
-        "• /ask - שאל שאלה את ה-AI\n"
-        "• /subjects - ניהול תחומי הלימוד\n"
+        "**פקודות בסיסיות:**\n"
+        "• /start - התחלת שיחה\n"
+        "• /help - הצגת עזרה\n"
+        "• /gitstatus - מצב Git\n"
+        "• /myfolder - יצירת תיקיה אישית\n"
+        "• /balance - מצב מטבעות\n"
+        "• /ask - שאילת שאלת AI\n\n"
+        "**למנהלים:**\n"
+        "• /coins - ניהול מטבעות\n"
+        "• /stats - סטטיסטיקות מערכת\n\n"
+        "**שימוש כללי:**\n"
+        "• שלח טקסט רגיל - יישמר בתיקיה האישית\n"
+        "• לחץ על כפתורים לתפריטים שונים\n"
         "• כל השינויים נשמרים אוטומטית ב-Git"
     )
+    
+    await update.message.reply_text(help_text)
 
-async def git_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def git_status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """פקודת /gitstatus"""
     if not is_authorized(update.effective_user.id):
         return
-    commits = git.last_commits(5)
-    if not commits:
-        await update.message.reply_text("ℹ️ אין קומיטים או שהריפו לא מוכן.")
-    else:
-        await update.message.reply_text("📊 קומיטים אחרונים:\n" + commits)
+    
+    repo_status = git_handler.get_repo_status()
+    
+    if repo_status["status"] == "not_ready":
+        await update.message.reply_text("❌ הריפוזיטורי לא מוכן")
+        return
+    
+    status_text = "📊 **סטטוס Git:**\n\n"
+    status_text += f"🔄 **סנכרון אחרון:** {repo_status.get('last_sync', 'לא ידוע')}\n"
+    status_text += f"🌿 **Branch:** {repo_status.get('branch', 'לא ידוע')}\n"
+    status_text += f"📝 **שינויים שלא commit:** {'כן' if repo_status.get('has_changes') else 'לא'}\n"
+    status_text += f"🔗 **Commit אחרון:** {repo_status.get('last_commit', 'לא ידוע')}\n\n"
+    
+    # קומיטים אחרונים
+    try:
+        result = CommandRunner.run(
+            ["git", "-C", git_handler.repo_path, "log", "--oneline", "-5"],
+            capture_output=True, text=True
+        )
+        if result.returncode == 0:
+            status_text += "📜 **קומיטים אחרונים:**\n" + result.stdout
+    except Exception as e:
+        logger.error("Error getting git log: %s", e)
+    
+    await update.message.reply_text(status_text)
+
+async def system_stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """פקודת /stats - סטטיסטיקות מערכת"""
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("❌ רק מנהלים יכולים לראות סטטיסטיקות מערכת")
+        return
+    
+    # סטטיסטיקות Git
+    repo_status = git_handler.get_repo_status()
+    
+    # סטטיסטיקות מטבעות
+    coin_stats = coin_system.get_system_stats()
+    
+    # סטטיסטיקות משתמשים
+    total_authorized = len(git_handler.authorized_users)
+    admins_count = len(config.ADMIN_USER_IDS)
+    regular_users = total_authorized - admins_count
+    
+    stats_text = "📈 **סטטיסטיקות מערכת - אקדמיה:**\n\n"
+    
+    stats_text += "👥 **משתמשים:**\n"
+    stats_text += f"• משתמשים מורשים: {total_authorized}\n"
+    stats_text += f"• מנהלים: {admins_count}\n"
+    stats_text += f"• משתמשים רגילים: {regular_users}\n\n"
+    
+    stats_text += "🪙 **מערכת מטבעות:**\n"
+    stats_text += f"• משתמשים עם מטבעות: {coin_stats['total_users']}\n"
+    stats_text += f"• מטבעות שכורים: {coin_stats['total_mined']}\n"
+    stats_text += f"• מטבעות במערכת: {coin_stats['total_coins']}\n"
+    stats_text += f"• עסקאות: {coin_stats['total_transactions']}\n\n"
+    
+    stats_text += "📊 **Git:**\n"
+    stats_text += f"• סטטוס: {repo_status.get('status', 'Unknown')}\n"
+    stats_text += f"• סנכרון אחרון: {repo_status.get('last_sync', 'Unknown')}\n"
+    stats_text += f"• Branch: {repo_status.get('branch', 'Unknown')}\n"
+    
+    await update.message.reply_text(stats_text)
 
 async def myfolder_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """פקודת /myfolder"""
     if not is_authorized(update.effective_user.id):
         return
     
@@ -552,7 +971,7 @@ async def myfolder_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 • שם: {user.first_name} {user.last_name or ''}
 • שם משתמש: @{user.username or 'לא צוין'}
 • ID: {user.id}
-• תאריך יצירה: {datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}
+• תאריך יצירה: {DateTimeUtils.get_formatted_datetime()}
 
 בתיקיה זו תוכל לשמור:
 • תרגילים
@@ -567,7 +986,7 @@ async def myfolder_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 🎓 אקדמיה להשכלה גבוהה - SLH Academia
 """
     
-    ok = git.commit_and_push(welcome_file, welcome_content, f"Create personal folder for {user.first_name} ({user.id})")
+    ok = git_handler.commit_and_push(welcome_file, welcome_content, f"Create personal folder for {user.first_name} ({user.id})")
     if ok:
         await update.message.reply_text(
             f"✅ **תיקיה אישית נוצרה בהצלחה!**\n\n"
@@ -581,112 +1000,15 @@ async def myfolder_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"וכו..."
         )
     else:
-        # Try alternative method if first method fails
-        try:
-            # Create folder locally first
-            os.makedirs(os.path.join(git.repo_path, user_folder), exist_ok=True)
-            with open(os.path.join(git.repo_path, welcome_file), "w", encoding="utf-8") as f:
-                f.write(welcome_content)
-            
-            # Force add and commit
-            run(["git", "-C", git.repo_path, "add", "."], check=True)
-            run(["git", "-C", git.repo_path, "commit", "-m", f"Create personal folder for {user.first_name} ({user.id})"], check=True)
-            run(["git", "-C", git.repo_path, "push", "origin", git.branch], check=True)
-            
-            await update.message.reply_text(
-                f"✅ **תיקיה אישית נוצרה בהצלחה!**\n\n"
-                f"📁 `{user_folder}/`\n\n"
-                f"🎓 החומר הלימודי שלך נשמר בצורה מאובטחת."
-            )
-        except Exception as e:
-            logger.error("Alternative folder creation also failed: %s", e)
-            await update.message.reply_text(
-                "❌ **שגיאה ביצירת תיקיה אישית.**\n\n"
-                "🏫 **אקדמיה להשכלה גבוהה**\n"
-                "המערכת תנסה שוב באופן אוטומטי. אתה יכול:\n"
-                "• לנסות שוב בעוד כמה דקות\n"
-                "• לשלוח הודעה למנהל @Osif83\n"
-                "• להמשיך להשתמש בשאר התכונות"
-            )
-
-async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    
-    # Reload authorized users to ensure we have the latest data
-    git._load_authorized_users()
-    
-    if not is_authorized(user_id):
-        return
-    
-    user = update.effective_user
-    text = update.message.text or ""
-    
-    if not text.strip():
-        await update.message.reply_text("❌ אנא שלח טקסט לשמירה.")
-        return
-    
-    # Check if this is a payment confirmation with photo
-    if context.user_data.get('waiting_for_payment_proof'):
-        # This will be handled by the photo handler
-        return
-    
-    # Check if waiting for AI question
-    if context.user_data.get('waiting_for_ai_question'):
-        await update.message.reply_text("🤖 AI מעבד את השאלה שלך...")
-        response = ai_service.ask_openai(text)
-        await update.message.reply_text(f"🤖 **תשובת AI:**\n\n{response}")
-        
-        # Save AI conversation
-        user_folder = f"students/{user.id}"
-        ts = datetime.datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-        filename = f"{user_folder}/ai_conversation_{ts}.txt"
-        
-        content = f"""שיחת AI:
-שאלה: {text}
-תשובה: {response}
-תאריך: {datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}
-"""
-        git.commit_and_push(filename, content, f"AI conversation for {user.first_name}")
-        
-        context.user_data['waiting_for_ai_question'] = False
-        return
-    
-    # יצירת תיקיית student אם לא קיימת
-    user_folder = f"students/{user.id}"
-    ts = datetime.datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-    filename = f"{user_folder}/note_{ts}.txt"
-    
-    content = f"""מידע תלמיד:
-• שם: {user.first_name} {user.last_name or ''}
-• שם משתמש: @{user.username or 'לא צוין'}
-• ID: {user.id}
-• תאריך: {datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}
-
-תוכן:
-{text}
-"""
-    
-    commit_message = f"Note from {user.first_name} ({user.id}) at {ts}"
-    ok = git.commit_and_push(filename, content, commit_message)
-    
-    if ok:
         await update.message.reply_text(
-            f"✅ **נשמר בהצלחה!**\n"
-            f"📁 תיקיה: `{user_folder}/`\n"
-            f"📄 קובץ: `note_{ts}.txt`\n\n"
-            f"🎓 **אקדמיה להשכלה גבוהה**\n"
-            f"החומר הלימודי שלך נשמר בצורה מאובטחת."
-        )
-    else:
-        await update.message.reply_text(
-            "❌ **שגיאה בשמירה.**\n\n"
+            "❌ **שגיאה ביצירת תיקיה אישית.**\n\n"
             "🏫 **אקדמיה להשכלה גבוהה**\n"
-            "המערכת תנסה לשמור שוב מאוחר יותר.\n"
-            "אתה יכול להמשיך להשתמש בשאר התכונות."
+            "המערכת תנסה שוב באופן אוטומטי.\n"
+            "אתה יכול לנסות שוב בעוד כמה דקות."
         )
 
-# --- Coin System Commands ---
 async def balance_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """פקודת /balance"""
     if not is_authorized(update.effective_user.id):
         return
     
@@ -714,7 +1036,24 @@ async def balance_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(message)
 
+async def ask_ai_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """פקודת /ask"""
+    if not is_authorized(update.effective_user.id):
+        return
+    
+    context.user_data['waiting_for_ai_question'] = True
+    await update.message.reply_text(
+        "🤖 **AI Assistant - אקדמיה להשכלה גבוהה**\n\n"
+        "שלח לי שאלה ואעזור לך עם:\n"
+        "• הסברים בתחומי הלימוד\n"
+        "• פתרון תרגילים\n"
+        "• הנחיה בפרויקטים\n"
+        "• תשובות לשאלות כלליות\n\n"
+        "💡 **טיפ:** שאל שאלות ספציפיות לתחומי העניין שלך!"
+    )
+
 async def coins_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """פקודת /coins - ניהול מטבעות למנהלים"""
     if not is_admin(update.effective_user.id):
         return
     
@@ -735,31 +1074,208 @@ async def coins_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=reply_markup
     )
 
-async def ask_ai_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_authorized(update.effective_user.id):
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """טיפול בהודעות טקסט"""
+    user_id = update.effective_user.id
+    
+    # רענון רשימת משתמשים מורשים
+    git_handler._load_authorized_users()
+    
+    if not is_authorized(user_id):
         return
     
-    context.user_data['waiting_for_ai_question'] = True
-    await update.message.reply_text(
-        "🤖 **AI Assistant - אקדמיה להשכלה גבוהה**\n\n"
-        "שלח לי שאלה ואעזור לך עם:\n"
-        "• הסברים בתחומי הלימוד\n"
-        "• פתרון תרגילים\n"
-        "• הנחיה בפרויקטים\n"
-        "• תשובות לשאלות כלליות\n\n"
-        "💡 **טיפ:** שאל שאלות ספציפיות לתחומי העניין שלך!"
-    )
+    user = update.effective_user
+    text = update.message.text or ""
+    
+    if not text.strip():
+        await update.message.reply_text("❌ אנא שלח טקסט לשמירה.")
+        return
+    
+    # Check if waiting for AI question
+    if context.user_data.get('waiting_for_ai_question'):
+        await update.message.reply_text("🤖 AI מעבד את השאלה שלך...")
+        response = ai_service.ask_ai(text)
+        await update.message.reply_text(f"🤖 **תשובת AI:**\n\n{response}")
+        
+        # Save AI conversation
+        user_folder = f"students/{user.id}"
+        ts = DateTimeUtils.get_timestamp()
+        filename = f"{user_folder}/ai_conversation_{ts}.txt"
+        
+        content = f"""שיחת AI:
+שאלה: {text}
+תשובה: {response}
+תאריך: {DateTimeUtils.get_formatted_datetime()}
+"""
+        git_handler.commit_and_push(filename, content, f"AI conversation for {user.first_name}")
+        
+        context.user_data['waiting_for_ai_question'] = False
+        return
+    
+    # Check if this is admin command for coins
+    if context.user_data.get('waiting_for_mine_amount'):
+        try:
+            amount = int(text)
+            if amount <= 0:
+                await update.message.reply_text("❌ הכמות חייבת להיות חיובית")
+                return
+            
+            context.user_data['mine_amount'] = amount
+            context.user_data['waiting_for_mine_amount'] = False
+            context.user_data['waiting_for_mine_reason'] = True
+            
+            await update.message.reply_text("📝 **הזן סיבה לכרייה:**\n\nלדוגמה: 'תגמול על מערכת חדשה'")
+            return
+            
+        except ValueError:
+            await update.message.reply_text("❌ הכמות חייבת להיות מספר")
+            return
+    
+    elif context.user_data.get('waiting_for_mine_reason'):
+        reason = text
+        amount = context.user_data.get('mine_amount')
+        
+        success, message = coin_system.mine_coins(user_id, amount, reason)
+        await update.message.reply_text(message)
+        
+        # Clean up
+        context.user_data.pop('mine_amount', None)
+        context.user_data.pop('waiting_for_mine_reason', None)
+        return
+    
+    elif context.user_data.get('waiting_for_transfer_details'):
+        try:
+            parts = text.split(',', 2)
+            if len(parts) < 3:
+                await update.message.reply_text("❌ פורמט לא תקין. השתמש ב: ID,כמות,סיבה")
+                return
+            
+            target_user_id = int(parts[0].strip())
+            amount = int(parts[1].strip())
+            reason = parts[2].strip()
+            
+            if amount <= 0:
+                await update.message.reply_text("❌ הכמות חייבת להיות חיובית")
+                return
+            
+            success, message = coin_system.transfer_coins(user_id, target_user_id, amount, reason)
+            await update.message.reply_text(message)
+            
+            # Clean up
+            context.user_data.pop('waiting_for_transfer_details', None)
+            return
+            
+        except ValueError:
+            await update.message.reply_text("❌ פורמט לא תקין. השתמש ב: ID,כמות,סיבה")
+            return
+    
+    # Check if waiting for payment proof
+    if context.user_data.get('waiting_for_payment_proof'):
+        # This will be handled by the photo handler
+        return
+    
+    # Regular text message - save to personal folder
+    user_folder = f"students/{user.id}"
+    ts = DateTimeUtils.get_timestamp()
+    filename = f"{user_folder}/note_{ts}.txt"
+    
+    content = f"""מידע תלמיד:
+• שם: {user.first_name} {user.last_name or ''}
+• שם משתמש: @{user.username or 'לא צוין'}
+• ID: {user.id}
+• תאריך: {DateTimeUtils.get_formatted_datetime()}
 
-# --- Payment and Access Request System ---
+תוכן:
+{text}
+"""
+    
+    commit_message = f"Note from {user.first_name} ({user.id}) at {ts}"
+    ok = git_handler.commit_and_push(filename, content, commit_message)
+    
+    if ok:
+        await update.message.reply_text(
+            f"✅ **נשמר בהצלחה!**\n"
+            f"📁 תיקיה: `{user_folder}/`\n"
+            f"📄 קובץ: `note_{ts}.txt`\n\n"
+            f"🎓 **אקדמיה להשכלה גבוהה**\n"
+            f"החומר הלימודי שלך נשמר בצורה מאובטחת."
+        )
+    else:
+        await update.message.reply_text(
+            "❌ **שגיאה בשמירה.**\n\n"
+            "🏫 **אקדמיה להשכלה גבוהה**\n"
+            "המערכת תנסה לשמור שוב מאוחר יותר.\n"
+            "אתה יכול להמשיך להשתמש בשאר התכונות."
+        )
+
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """טיפול בתמונות (הוכחת תשלום)"""
+    if not context.user_data.get('waiting_for_payment_proof'):
+        return
+    
+    user = update.effective_user
+    photo = update.message.photo[-1]  # Get the highest resolution photo
+    
+    # Notify admins about payment proof
+    message_text = (
+        f"📸 **בקשת גישה עם הוכחת תשלום**\n\n"
+        f"👤 **שם:** {user.first_name} {user.last_name or ''}\n"
+        f"📱 **משתמש:** @{user.username or 'לא צוין'}\n"
+        f"🆔 **ID:** {user.id}\n"
+        f"💵 **סכום:** 444 ש\"ח\n"
+        f"⏰ **תאריך:** {DateTimeUtils.get_formatted_datetime()}\n\n"
+        f"🏫 **אקדמיה להשכלה גבוהה**"
+    )
+    
+    keyboard = [
+        [
+            InlineKeyboardButton("✅ אשר גישה", callback_data=f"approve_{user.id}"),
+            InlineKeyboardButton("❌ דחה", callback_data=f"reject_{user.id}")
+        ]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    # Send to all admins with photo
+    sent_to_admins = False
+    for admin_id in config.ADMIN_USER_IDS:
+        try:
+            # Send the photo with caption
+            await context.bot.send_photo(
+                chat_id=admin_id,
+                photo=photo.file_id,
+                caption=message_text,
+                reply_markup=reply_markup
+            )
+            sent_to_admins = True
+            logger.info("Payment proof sent to admin: %s", admin_id)
+        except Exception as e:
+            logger.error("Failed to send message to admin %s: %s", admin_id, e)
+
+    if sent_to_admins:
+        await update.message.reply_text(
+            "📸 **תמונת התשלום נשלחה למנהל לאישור.**\n\n"
+            "🏫 **אקדמיה להשכלה גבוהה**\n"
+            "תקבל הודעה כאשר תאושר, בדרך כלל תוך 24 שעות.\n\n"
+            "📚 **בינתיים, אתה יכול:**\n"
+            "• להתכונן ללימודים\n"
+            "• לחשוב על תחומי עניין\n"
+            "• להכין שאלות למנחה"
+        )
+    else:
+        await update.message.reply_text("❌ שגיאה בשליחת הבקשה. נסה שוב מאוחר יותר.")
+    
+    context.user_data['waiting_for_payment_proof'] = False
+
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """טיפול בלחיצות על כפתורים"""
     query = update.callback_query
     await query.answer()
 
     user_id = query.from_user.id
     data = query.data
 
-    # Reload authorized users to ensure we have the latest data
-    git._load_authorized_users()
+    # רענון רשימת משתמשים מורשים
+    git_handler._load_authorized_users()
 
     if data == "why_join":
         # Show benefits of joining
@@ -969,7 +1485,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 • שם: {query.from_user.first_name} {query.from_user.last_name or ''}
 • שם משתמש: @{query.from_user.username or 'לא צוין'}
 • ID: {user_id}
-• תאריך יצירה: {datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}
+• תאריך יצירה: {DateTimeUtils.get_formatted_datetime()}
 
 בתיקיה זו תוכל לשמור:
 • תרגילים
@@ -982,7 +1498,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 🎓 אקדמיה להשכלה גבוהה - SLH Academia
 """
         
-        ok = git.commit_and_push(welcome_file, welcome_content, f"Create personal folder for {query.from_user.first_name} ({user_id})")
+        ok = git_handler.commit_and_push(welcome_file, welcome_content, f"Create personal folder for {query.from_user.first_name} ({user_id})")
         if ok:
             await query.edit_message_text(
                 f"✅ **תיקיה אישית נוצרה!**\n\n"
@@ -1010,9 +1526,37 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "שלח את שאלתך now:"
         )
 
+    elif data == "system_status":
+        repo_status = git_handler.get_repo_status()
+        coin_stats = coin_system.get_system_stats()
+        
+        status_text = "📊 **סטטוס מערכת - אקדמיה:**\n\n"
+        
+        status_text += "🔄 **Git Repository:**\n"
+        status_text += f"• סטטוס: {repo_status.get('status', 'Unknown')}\n"
+        status_text += f"• סנכרון אחרון: {repo_status.get('last_sync', 'Unknown')}\n"
+        status_text += f"• Branch: {repo_status.get('branch', 'Unknown')}\n\n"
+        
+        status_text += "🪙 **מערכת מטבעות:**\n"
+        status_text += f"• משתמשים פעילים: {coin_stats['total_users']}\n"
+        status_text += f"• מטבעות במערכת: {coin_stats['total_coins']}\n"
+        status_text += f"• עסקאות: {coin_stats['total_transactions']}\n\n"
+        
+        status_text += "👥 **משתמשים:**\n"
+        status_text += f"• משתמשים מורשים: {len(git_handler.authorized_users)}\n"
+        status_text += f"• מנהלים: {len(config.ADMIN_USER_IDS)}\n\n"
+        
+        status_text += f"🕒 **זמן מערכת:** {DateTimeUtils.get_formatted_datetime()}"
+        
+        keyboard = [
+            [InlineKeyboardButton("🔙 חזרה", callback_data="back_to_start")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(status_text, reply_markup=reply_markup)
+
     elif data == "back_to_start":
         # Go back to start
-        git._load_authorized_users()  # Reload to ensure latest data
+        git_handler._load_authorized_users()  # Reload to ensure latest data
         
         if is_authorized(user_id):
             balance = coin_system.get_balance(user_id)
@@ -1020,7 +1564,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 [InlineKeyboardButton("🎓 על האקדמיה", callback_data="about_academy")],
                 [InlineKeyboardButton("🪙 מצב ארנק", callback_data="check_balance")],
                 [InlineKeyboardButton("🤖 שאל את AI", callback_data="ask_ai")],
-                [InlineKeyboardButton("📁 תיקיות אישיות", callback_data="personal_folders")]
+                [InlineKeyboardButton("📁 תיקיות אישיות", callback_data="personal_folders")],
+                [InlineKeyboardButton("📊 סטטוס מערכת", callback_data="system_status")]
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
             
@@ -1064,10 +1609,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         target_user_id = int(data.split("_")[1])
-        success = git.add_authorized_user(target_user_id)
+        success = git_handler.add_authorized_user(target_user_id)
         if success:
             # Reload authorized users to ensure the new user is recognized
-            git._load_authorized_users()
+            git_handler._load_authorized_users()
             
             # Notify the approved user
             try:
@@ -1075,7 +1620,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     chat_id=target_user_id,
                     text=f"🎉 **הבקשה שלך אושרה!**\n\n"
                          f"🏫 **ברוך הבא לאקדמיה להשכלה גבוהה!**\n\n"
-                         f"👥 **הצטרף לקבוצה:** {GROUP_LINK}\n\n"
+                         f"👥 **הצטרף לקבוצה:** {config.GROUP_LINK}\n\n"
                          f"📚 **מה עכשיו?**\n"
                          f"• שלח /start להתחלה\n"
                          f"• שאל את ה-AI שאלות\n"
@@ -1137,177 +1682,61 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         
         stats = coin_system.get_system_stats()
-        await query.edit_message_text(
-            f"📊 **סטטיסטיקות מערכת מטבעות:**\n\n"
-            f"👥 משתמשים: {stats['total_users']}\n"
-            f"⛏️ מטבעות שכורים: {stats['total_mined']}\n"
-            f"🔗 עסקאות: {stats['total_transactions']}"
-        )
-
-# --- Photo handler for payment proof ---
-async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.user_data.get('waiting_for_payment_proof'):
-        return
-    
-    user = update.effective_user
-    photo = update.message.photo[-1]  # Get the highest resolution photo
-    
-    # Notify admins about payment proof
-    message_text = (
-        f"📸 **בקשת גישה עם הוכחת תשלום**\n\n"
-        f"👤 **שם:** {user.first_name} {user.last_name or ''}\n"
-        f"📱 **משתמש:** @{user.username or 'לא צוין'}\n"
-        f"🆔 **ID:** {user.id}\n"
-        f"💵 **סכום:** 444 ש\"ח\n"
-        f"⏰ **תאריך:** {datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}\n\n"
-        f"🏫 **אקדמיה להשכלה גבוהה**"
-    )
-    
-    keyboard = [
-        [
-            InlineKeyboardButton("✅ אשר גישה", callback_data=f"approve_{user.id}"),
-            InlineKeyboardButton("❌ דחה", callback_data=f"reject_{user.id}")
-        ]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
-    # Send to all admins with photo
-    sent_to_admins = False
-    for admin_id in ADMIN_USER_IDS:
-        try:
-            # Send the photo with caption
-            await context.bot.send_photo(
-                chat_id=admin_id,
-                photo=photo.file_id,
-                caption=message_text,
-                reply_markup=reply_markup
-            )
-            sent_to_admins = True
-            logger.info("Payment proof sent to admin: %s", admin_id)
-        except Exception as e:
-            logger.error("Failed to send message to admin %s: %s", admin_id, e)
-
-    if sent_to_admins:
-        await update.message.reply_text(
-            "📸 **תמונת התשלום נשלחה למנהל לאישור.**\n\n"
-            "🏫 **אקדמיה להשכלה גבוהה**\n"
-            "תקבל הודעה כאשר תאושר, בדרך כלל תוך 24 שעות.\n\n"
-            "📚 **בינתיים, אתה יכול:**\n"
-            "• להתכונן ללימודים\n"
-            "• לחשוב על תחומי עניין\n"
-            "• להכין שאלות למנחה"
-        )
-    else:
-        await update.message.reply_text("❌ שגיאה בשליחת הבקשה. נסה שוב מאוחר יותר.")
-    
-    context.user_data['waiting_for_payment_proof'] = False
-
-# --- Admin message handlers for coin system ---
-async def handle_admin_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        return
-    
-    user_id = update.effective_user.id
-    text = update.message.text
-    
-    if context.user_data.get('waiting_for_mine_amount'):
-        try:
-            amount = int(text)
-            if amount <= 0:
-                await update.message.reply_text("❌ הכמות חייבת להיות חיובית")
-                return
-            
-            context.user_data['mine_amount'] = amount
-            context.user_data['waiting_for_mine_amount'] = False
-            context.user_data['waiting_for_mine_reason'] = True
-            
-            await update.message.reply_text("📝 **הזן סיבה לכרייה:**\n\nלדוגמה: 'תגמול על מערכת חדשה'")
-            
-        except ValueError:
-            await update.message.reply_text("❌ הכמות חייבת להיות מספר")
-    
-    elif context.user_data.get('waiting_for_mine_reason'):
-        reason = text
-        amount = context.user_data.get('mine_amount')
+        rankings = coin_system.get_user_rankings(5)
         
-        success, message = coin_system.mine_coins(user_id, amount, reason)
-        await update.message.reply_text(message)
+        stats_text = f"📊 **סטטיסטיקות מערכת מטבעות:**\n\n"
+        stats_text += f"👥 משתמשים: {stats['total_users']}\n"
+        stats_text += f"⛏️ מטבעות שכורים: {stats['total_mined']}\n"
+        stats_text += f"💰 מטבעות במערכת: {stats['total_coins']}\n"
+        stats_text += f"🔗 עסקאות: {stats['total_transactions']}\n\n"
         
-        # Clean up
-        context.user_data.pop('mine_amount', None)
-        context.user_data.pop('waiting_for_mine_reason', None)
-    
-    elif context.user_data.get('waiting_for_transfer_details'):
-        try:
-            parts = text.split(',', 2)
-            if len(parts) < 3:
-                await update.message.reply_text("❌ פורמט לא תקין. השתמש ב: ID,כמות,סיבה")
-                return
-            
-            target_user_id = int(parts[0].strip())
-            amount = int(parts[1].strip())
-            reason = parts[2].strip()
-            
-            if amount <= 0:
-                await update.message.reply_text("❌ הכמות חייבת להיות חיובית")
-                return
-            
-            success, message = coin_system.transfer_coins(user_id, target_user_id, amount, reason)
-            await update.message.reply_text(message)
-            
-            # Clean up
-            context.user_data.pop('waiting_for_transfer_details', None)
-            
-        except ValueError:
-            await update.message.reply_text("❌ פורמט לא תקין. השתמש ב: ID,כמות,סיבה")
+        if rankings:
+            stats_text += "🏆 **דירוג משתמשים:**\n"
+            for i, (user_id, balance) in enumerate(rankings, 1):
+                stats_text += f"{i}. User {user_id}: {balance} coins\n"
+        
+        await query.edit_message_text(stats_text)
 
-# --- Flask endpoints ---
-@app.route("/", methods=["GET"])
-def index():
-    return "🚀 Telegram Git Bot - SLH Academia is running!"
-
-@app.route("/health", methods=["GET"])
-def health():
-    return "✅ Healthy - SLH Academia"
-
-@app.route("/webhook/" + (BOT_TOKEN or ""), methods=["POST"])
-def webhook():
-    if BOT_TOKEN:
-        application = Application.builder().token(BOT_TOKEN).build()
-        update = Update.de_json(request.get_json(), application.bot)
-        application.process_update(update)
-    return "OK"
-
-# --- הפעלת הבוט עם webhook ---
-def main():
-    application = Application.builder().token(BOT_TOKEN).build()
-    
-    # הוספת handlers
+# ===== BOT SETUP =====
+def setup_bot_handlers(application):
+    """הגדרת handlers לבוט"""
+    # Command handlers
     application.add_handler(CommandHandler("start", start_cmd))
     application.add_handler(CommandHandler("help", help_cmd))
-    application.add_handler(CommandHandler("gitstatus", git_status))
+    application.add_handler(CommandHandler("gitstatus", git_status_cmd))
+    application.add_handler(CommandHandler("stats", system_stats_cmd))
     application.add_handler(CommandHandler("myfolder", myfolder_cmd))
     application.add_handler(CommandHandler("balance", balance_cmd))
-    application.add_handler(CommandHandler("coins", coins_cmd))
     application.add_handler(CommandHandler("ask", ask_ai_cmd))
+    application.add_handler(CommandHandler("coins", coins_cmd))
+    
+    # Message handlers
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_admin_messages))
     application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+    
+    # Callback query handler
     application.add_handler(CallbackQueryHandler(button_callback))
 
-    # הגדרת webhook
-    webhook_path = f"/webhook/{BOT_TOKEN}"
-    webhook_url = f"{WEBHOOK_URL.rstrip('/')}{webhook_path}"
+def main():
+    """הפעלת הבוט הראשי"""
+    application = Application.builder().token(config.BOT_TOKEN).build()
     
-    logger.info("Setting webhook to: %s", "***" + webhook_url[-20:])  # הסתרת ה-URL המלא
+    # Setup handlers
+    setup_bot_handlers(application)
+    
+    # Configure webhook
+    webhook_path = f"/webhook/{config.BOT_TOKEN}"
+    webhook_url = f"{config.WEBHOOK_URL.rstrip('/')}{webhook_path}"
+    
+    logger.info("Setting webhook to: %s", "***" + webhook_url[-20:])  # Secure logging
     
     try:
         application.run_webhook(
             listen="0.0.0.0",
-            port=PORT,
+            port=config.PORT,
             url_path=webhook_path,
             webhook_url=webhook_url,
-            secret_token=os.getenv("SECRET_TOKEN")
+            secret_token=config.SECRET_TOKEN
         )
         logger.info("Bot started successfully with webhook")
     except Exception as e:
