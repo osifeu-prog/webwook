@@ -18,23 +18,30 @@ from flask import Response
 class Config:
     """ניהול תצורת המערכת"""
     def __init__(self):
-        self.BOT_TOKEN = os.getenv("TELEGRAM_TOKEN") or os.getenv("BOT_TOKEN")
-        self.WEBHOOK_URL = os.getenv("WEBHOOK_URL")
-        self.GIT_REPO_URL = os.getenv("GIT_REPO_URL")
-        self.GIT_BRANCH = os.getenv("GIT_BRANCH", "main")
-        self.GIT_USERNAME = os.getenv("GIT_USERNAME", "telegram-bot")
-        self.GIT_EMAIL = os.getenv("GIT_EMAIL", "bot@example.com")
-        self.PORT = int(os.getenv("PORT", 8080))
-        self.GROUP_LINK = os.getenv("GROUP_LINK", "https://t.me/+mIYkHnpCj6g2ZmRk")
-        self.OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-        self.HUGGINGFACE_API_KEY = os.getenv("HUGGINGFACE_API_KEY")
-        self.SECRET_TOKEN = os.getenv("SECRET_TOKEN")
+        self.BOT_TOKEN = self._clean_env_var(os.getenv("TELEGRAM_TOKEN") or os.getenv("BOT_TOKEN"))
+        self.WEBHOOK_URL = self._clean_env_var(os.getenv("WEBHOOK_URL"))
+        self.GIT_REPO_URL = self._clean_env_var(os.getenv("GIT_REPO_URL"))
+        self.GIT_BRANCH = self._clean_env_var(os.getenv("GIT_BRANCH", "main"))
+        self.GIT_USERNAME = self._clean_env_var(os.getenv("GIT_USERNAME", "telegram-bot"))
+        self.GIT_EMAIL = self._clean_env_var(os.getenv("GIT_EMAIL", "bot@example.com"))
+        self.PORT = int(self._clean_env_var(os.getenv("PORT", "8080")))
+        self.GROUP_LINK = self._clean_env_var(os.getenv("GROUP_LINK", "https://t.me/+mIYkHnpCj6g2ZmRk"))
+        self.OPENAI_API_KEY = self._clean_env_var(os.getenv("OPENAI_API_KEY"))
+        self.HUGGINGFACE_API_KEY = self._clean_env_var(os.getenv("HUGGINGFACE_API_KEY"))
+        self.SECRET_TOKEN = self._clean_env_var(os.getenv("SECRET_TOKEN"))
         
         # Admin configuration
-        admin_ids_str = os.getenv("ADMIN_USER_IDS", "224223270")
+        admin_ids_str = self._clean_env_var(os.getenv("ADMIN_USER_IDS", "224223270"))
         self.ADMIN_USER_IDS = self._parse_admin_ids(admin_ids_str)
         
         self._validate_required_config()
+    
+    def _clean_env_var(self, value: Optional[str]) -> Optional[str]:
+        """ניקוי משתני סביבה מתווים לא רצויים כמו newlines"""
+        if value is None:
+            return None
+        # הסרת whitespace מההתחלה והסוף, כולל newlines
+        return value.strip()
     
     def _parse_admin_ids(self, admin_ids_str: str) -> List[int]:
         """פרסור IDsof מנהלים"""
@@ -52,6 +59,13 @@ class Config:
             raise SystemExit("❌ Missing required environment variable: WEBHOOK_URL.")
         if not self.GIT_REPO_URL:
             raise SystemExit("❌ Missing required environment variable: GIT_REPO_URL.")
+        
+        # Log cleaned values (without sensitive data)
+        logger.info("Configuration loaded:")
+        logger.info("WEBHOOK_URL: %s", self.WEBHOOK_URL)
+        logger.info("GIT_REPO_URL: %s", self.GIT_REPO_URL)
+        logger.info("GIT_BRANCH: %s", self.GIT_BRANCH)
+        logger.info("ADMIN_USER_IDS: %s", self.ADMIN_USER_IDS)
 
 # ===== LOGGING SETUP =====
 class SecureFormatter(logging.Formatter):
@@ -268,6 +282,11 @@ class GitHandler:
         self.branch = config.GIT_BRANCH
         self.authorized_users = set()
         self.last_sync = None
+        
+        # Log the cleaned Git URL for debugging
+        logger.info("Git Repository URL: '%s'", self.repo_url)
+        logger.info("Git Branch: '%s'", self.branch)
+        
         self._configure_git()
         self._prepare_repo()
         self._load_authorized_users()
@@ -283,14 +302,29 @@ class GitHandler:
     
     def _prepare_repo(self):
         """הכנת הריפוזיטורי - clone או pull"""
-        if os.path.isdir(os.path.join(self.repo_path, ".git")):
+        # Check if repo directory exists and has .git subdirectory
+        git_dir = os.path.join(self.repo_path, ".git")
+        if os.path.isdir(git_dir):
+            logger.info("Existing Git repository found, attempting sync...")
             self._sync_repo()
         else:
+            logger.info("No existing Git repository found, cloning...")
             self._clone_repo()
     
     def _sync_repo(self):
         """סנכרון הריפוזיטורי עם origin"""
         try:
+            # Check if we're on the right branch
+            branch_result = CommandRunner.run(
+                ["git", "-C", self.repo_path, "branch", "--show-current"], 
+                capture_output=True, text=True
+            )
+            current_branch = branch_result.stdout.strip()
+            
+            if current_branch != self.branch:
+                logger.info("Switching from branch '%s' to '%s'", current_branch, self.branch)
+                CommandRunner.run(["git", "-C", self.repo_path, "checkout", self.branch], check=True)
+            
             CommandRunner.run(["git", "-C", self.repo_path, "pull", "origin", self.branch], check=True)
             self.last_sync = DateTimeUtils.get_iso_timestamp()
             logger.info("Repository synced successfully")
@@ -302,20 +336,46 @@ class GitHandler:
     def _clone_repo(self):
         """Clone של הריפוזיטורי"""
         try:
-            CommandRunner.run(["git", "clone", "-b", self.branch, self.repo_url, self.repo_path], check=True)
+            # Ensure the repo path doesn't exist or is empty
+            if os.path.exists(self.repo_path):
+                logger.warning("Repository path %s already exists, attempting to use it", self.repo_path)
+                # Try to init if it's not a git repo
+                if not os.path.isdir(os.path.join(self.repo_path, ".git")):
+                    logger.info("Initializing new Git repository in existing directory")
+                    CommandRunner.run(["git", "-C", self.repo_path, "init"], check=True)
+                    CommandRunner.run(["git", "-C", self.repo_path, "remote", "add", "origin", self.repo_url], check=True)
+            else:
+                # Normal clone
+                logger.info("Cloning repository from %s to %s", self.repo_url, self.repo_path)
+                CommandRunner.run([
+                    "git", "clone", 
+                    "-b", self.branch, 
+                    self.repo_url, 
+                    self.repo_path
+                ], check=True)
+            
             self.last_sync = DateTimeUtils.get_iso_timestamp()
-            logger.info("Repository cloned successfully")
+            logger.info("Repository setup successfully")
             GIT_SYNC_STATUS.set(1)
+            
         except subprocess.CalledProcessError as e:
-            logger.error("Clone failed: %s", e)
+            logger.error("Git operation failed: %s", e)
             GIT_SYNC_STATUS.set(0)
+            
+            # Provide more helpful error message
+            if "fatal: credential url cannot be parsed" in str(e):
+                logger.error("Git URL parsing error - please check GIT_REPO_URL environment variable")
+                logger.error("Current GIT_REPO_URL value: '%s'", self.repo_url)
+            
             raise
     
     def _force_reclone(self):
         """כופה clone מחדש של הריפוזיטורי"""
         import shutil
         try:
-            shutil.rmtree(self.repo_path, ignore_errors=True)
+            if os.path.exists(self.repo_path):
+                logger.warning("Removing existing repository directory: %s", self.repo_path)
+                shutil.rmtree(self.repo_path, ignore_errors=True)
             self._clone_repo()
         except Exception as e:
             logger.error("Force re-clone failed: %s", e)
@@ -331,7 +391,7 @@ class GitHandler:
         for admin_id in self.config.ADMIN_USER_IDS:
             self.authorized_users.add(admin_id)
         
-        # טעינה מהקובץ
+        # טעינה מהקובץ אם קיים
         if os.path.exists(authorized_users_file):
             try:
                 with open(authorized_users_file, "r", encoding="utf-8") as f:
@@ -344,9 +404,30 @@ class GitHandler:
                                 logger.warning("Invalid user ID in authorized_users.txt: %s", line)
             except Exception as e:
                 logger.error("Error reading authorized_users.txt: %s", e)
+        else:
+            logger.info("No authorized_users.txt file found, creating default...")
+            # Create default authorized users file
+            self._create_default_authorized_users_file()
         
         logger.info("Loaded %d authorized users", len(self.authorized_users))
         ACTIVE_USERS.set(len(self.authorized_users))
+    
+    def _create_default_authorized_users_file(self):
+        """יצירת קובץ authorized_users.txt ברירת מחדל"""
+        authorized_users_file = os.path.join(self.repo_path, "authorized_users.txt")
+        try:
+            content = """# Authorized users list
+# Format: one user ID per line
+# Admins are automatically added from ADMIN_USER_IDS
+
+# Add user IDs below this line (one per line):
+"""
+            os.makedirs(os.path.dirname(authorized_users_file), exist_ok=True)
+            with open(authorized_users_file, "w", encoding="utf-8") as f:
+                f.write(content)
+            logger.info("Created default authorized_users.txt file")
+        except Exception as e:
+            logger.error("Failed to create authorized_users.txt: %s", e)
     
     def repo_ready(self) -> bool:
         """בודק אם הריפוזיטורי מוכן"""
@@ -433,8 +514,7 @@ class GitHandler:
         
         # יצירת קובץ אם לא קיים
         if not os.path.exists(authorized_users_file):
-            with open(authorized_users_file, "w", encoding="utf-8") as f:
-                f.write("# Authorized users list\n# Format: one user ID per line\n# Admins are automatically added\n\n")
+            self._create_default_authorized_users_file()
         
         # בדיקה אם המשתמש כבר קיים
         try:
@@ -702,15 +782,22 @@ class CoinSystem:
 app = Flask(__name__)
 
 # Initialize components
-config = Config()
-
-# Log startup with secure info
-logger.info("Bot starting with secure logging. Admin users: %s", config.ADMIN_USER_IDS)
-
-# Initialize services
-ai_service = AIService(config)
-git_handler = GitHandler(config)
-coin_system = CoinSystem(git_handler)
+try:
+    config = Config()
+    
+    # Log startup with secure info
+    logger.info("Bot starting with secure logging. Admin users: %s", config.ADMIN_USER_IDS)
+    
+    # Initialize services
+    ai_service = AIService(config)
+    git_handler = GitHandler(config)
+    coin_system = CoinSystem(git_handler)
+    
+    logger.info("All services initialized successfully")
+    
+except Exception as e:
+    logger.error("Failed to initialize services: %s", e)
+    raise
 
 # ===== MONITORING DECORATORS =====
 def monitor_requests(func):
