@@ -38,11 +38,28 @@ if not WEBHOOK_URL:
 if not GIT_REPO_URL:
     raise SystemExit("❌ Missing required environment variable: GIT_REPO_URL.")
 
-logging.info("Admin users: %s", ADMIN_USER_IDS)
+# --- לוגים מוגנים ---
+class SecureFormatter(logging.Formatter):
+    def format(self, record):
+        # הסתרת טוקנים ומידע רגיש
+        message = super().format(record)
+        if BOT_TOKEN:
+            message = message.replace(BOT_TOKEN, "BOT_TOKEN_" + BOT_TOKEN[-6:])
+        return message
 
-# --- לוגים ---
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logging.basicConfig(
+    level=logging.INFO, 
+    format="%(asctime)s - %(levelname)s - %(message)s"
+)
+
+# החלת הפורמטר המוגן על כל הלוגרים
+for handler in logging.root.handlers:
+    handler.setFormatter(SecureFormatter("%(asctime)s - %(levelname)s - %(message)s"))
+
 logger = logging.getLogger(__name__)
+
+# לוג התחלה בטוח
+logger.info("Bot starting with secure logging. Admin users: %s", ADMIN_USER_IDS)
 
 # --- Flask עבור Railway ---
 app = Flask(__name__)
@@ -183,7 +200,7 @@ class GitHandler:
             except Exception as e:
                 logger.error("Error reading authorized_users.txt: %s", e)
         
-        logger.info("Loaded %d authorized users: %s", len(self.authorized_users), self.authorized_users)
+        logger.info("Loaded %d authorized users", len(self.authorized_users))
 
     def repo_ready(self):
         return os.path.isdir(os.path.join(self.repo_path, ".git"))
@@ -1282,7 +1299,7 @@ def main():
     webhook_path = f"/webhook/{BOT_TOKEN}"
     webhook_url = f"{WEBHOOK_URL.rstrip('/')}{webhook_path}"
     
-    logger.info("Setting webhook to: %s", webhook_url)
+    logger.info("Setting webhook to: %s", "***" + webhook_url[-20:])  # הסתרת ה-URL המלא
     
     try:
         application.run_webhook(
