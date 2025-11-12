@@ -1,3 +1,16 @@
 python-telegram-bot[webhooks]==20.7
 Flask==2.3.3
 requests==2.31.0
+python-dotenv==1.0.0
+PyYAML==6.0.1
+cryptography==41.0.7
+psycopg2-binary==2.9.9
+SQLAlchemy==2.0.23
+alembic==1.12.1
+pydantic==2.5.0
+pydantic-settings==2.1.0
+redis==5.0.1
+celery==5.3.4
+prometheus-client==0.19.0
+sentry-sdk==1.40.0
+gunicorn==21.2.0
