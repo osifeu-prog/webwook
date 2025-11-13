@@ -1,4 +1,4 @@
-# db.py - מערכת database מלאה עם כל הטבלאות הנדרשות
+# db.py - מערכת database מלאה עם כל הטבלאות הנדרשות - מתוקן
 import os
 import logging
 import psycopg2
@@ -6,6 +6,7 @@ from psycopg2.extras import RealDictCursor
 from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional
 from decimal import Decimal
+from urllib.parse import urlparse
 
 # הגדרות לוג
 logger = logging.getLogger(__name__)
@@ -17,7 +18,39 @@ def get_db_connection():
     if not database_url:
         raise ValueError("DATABASE_URL environment variable is not set")
     
-    return psycopg2.connect(database_url, sslmode='require')
+    try:
+        # ניסיון חיבור ישיר ראשון
+        return psycopg2.connect(database_url, sslmode='require')
+    except Exception as e:
+        logger.warning(f"Direct connection failed: {e}, trying parsed connection...")
+        
+        try:
+            # אם החיבור הישיר נכשל, נפרק את ה-URL
+            parsed = urlparse(database_url)
+            
+            # חילוץ הרכיבים
+            dbname = parsed.path[1:]  # מסירים את ה-/ הראשון
+            user = parsed.username
+            password = parsed.password
+            host = parsed.hostname
+            port = parsed.port or 5432  # ברירת מחדל ל-PostgreSQL
+            
+            logger.info(f"Connecting to database: {host}:{port}/{dbname} as user {user}")
+            
+            # חיבור עם פרמטרים מפורשים
+            conn = psycopg2.connect(
+                dbname=dbname,
+                user=user,
+                password=password,
+                host=host,
+                port=port,
+                sslmode='require'
+            )
+            return conn
+        except Exception as parse_error:
+            logger.error(f"Parsed connection also failed: {parse_error}")
+            logger.error(f"Database URL format: {database_url}")
+            raise ConnectionError(f"Failed to connect to database: {parse_error}")
 
 # =========================
 # אתחול סכמה
