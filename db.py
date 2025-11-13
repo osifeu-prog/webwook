@@ -1,955 +1,965 @@
-# main.py - מעודכן עם אינטגרציה מלאה ל-database
+# db.py - מערכת database מלאה עם כל הטבלאות הנדרשות
 import os
 import logging
-from collections import deque
-from contextlib import asynccontextmanager
-from datetime import datetime
-from http import HTTPStatus
-from typing import Deque, Set, Literal, Optional, Dict, Any, List
-
-from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
-from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
-from telegram.error import TelegramError
-
-from db import (
-    init_schema, store_user, get_user_wallet, update_user_wallet,
-    get_user_tasks, start_task, submit_task, approve_task, 
-    get_user_stats, add_referral, get_top_referrers, get_pending_approvals
-)
-from token_distributor import token_distributor
+import psycopg2
+from psycopg2.extras import RealDictCursor
+from datetime import datetime, timedelta
+from typing import List, Dict, Any, Optional
+from decimal import Decimal
 
 # הגדרות לוג
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
 logger = logging.getLogger(__name__)
 
-# משתני סביבה
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
-WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "https://webwook-production.up.railway.app")
-ADMIN_IDS = [int(x.strip()) for x in os.environ.get("ADMIN_USER_IDS", "224223270").split(",")]
-PORT = int(os.environ.get("PORT", 8080))
-
-# אתחול הבוט
-ptb_app = Application.builder().token(BOT_TOKEN).build()
+# חיבור ל-database
+def get_db_connection():
+    """מחזיר חיבור ל-database"""
+    database_url = os.environ.get("DATABASE_URL")
+    if not database_url:
+        raise ValueError("DATABASE_URL environment variable is not set")
+    
+    return psycopg2.connect(database_url, sslmode='require')
 
 # =========================
-# Utilities
+# אתחול סכמה
 # =========================
 
-async def ensure_user(update: Update) -> bool:
-    """מוודא שהמשתמש רשום במערכת"""
-    user = update.effective_user
-    if not user:
+def init_schema():
+    """מאתחל את כל הטבלאות במערכת"""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    
+    try:
+        # טבלת משתמשים
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                user_id BIGINT PRIMARY KEY,
+                username VARCHAR(100),
+                first_name VARCHAR(100) NOT NULL,
+                wallet_address VARCHAR(42),
+                referral_code VARCHAR(50),
+                total_points INTEGER DEFAULT 0,
+                total_tokens DECIMAL(18,8) DEFAULT 0,
+                completed_tasks INTEGER DEFAULT 0,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+        """)
+        
+        # טבלת משימות
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS tasks (
+                task_number INTEGER PRIMARY KEY,
+                title VARCHAR(200) NOT NULL,
+                description TEXT NOT NULL,
+                reward_points INTEGER NOT NULL,
+                reward_tokens DECIMAL(18,8) NOT NULL,
+                is_active BOOLEAN DEFAULT TRUE,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+        """)
+        
+        # טבלת התקדמות משתמשים במשימות
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS user_tasks (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT NOT NULL,
+                task_number INTEGER NOT NULL,
+                status VARCHAR(20) DEFAULT 'pending', -- pending, started, submitted, approved
+                submitted_proof TEXT,
+                submitted_at TIMESTAMPTZ,
+                approved_at TIMESTAMPTZ,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                UNIQUE(user_id, task_number)
+            );
+        """)
+        
+        # טבלת הפניות
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS referrals (
+                id SERIAL PRIMARY KEY,
+                referrer_id BIGINT NOT NULL,
+                referred_id BIGINT NOT NULL,
+                bonus_awarded BOOLEAN DEFAULT FALSE,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                UNIQUE(referrer_id, referred_id)
+            );
+        """)
+        
+        # טבלת מנויים ותשלומים
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS subscriptions (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT NOT NULL,
+                amount DECIMAL(10,2) NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                payment_method TEXT,
+                transaction_id TEXT,
+                access_granted BOOLEAN DEFAULT FALSE,
+                group_access BOOLEAN DEFAULT FALSE,
+                expires_at TIMESTAMPTZ,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+        """)
+        
+        # טבלת כלכלת משתמשים
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS user_economy (
+                user_id BIGINT PRIMARY KEY,
+                academy_coins DECIMAL(18,8) DEFAULT 0,
+                learning_points INTEGER DEFAULT 0,
+                teaching_points INTEGER DEFAULT 0,
+                leadership_level INTEGER DEFAULT 1,
+                total_earnings DECIMAL(18,8) DEFAULT 0,
+                daily_streak INTEGER DEFAULT 0,
+                last_activity_date DATE,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+        """)
+        
+        # טבלת רשת לימודית
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS learning_network (
+                id SERIAL PRIMARY KEY,
+                teacher_id BIGINT NOT NULL,
+                student_id BIGINT NOT NULL,
+                level INTEGER DEFAULT 1,
+                coins_earned DECIMAL(18,8) DEFAULT 0,
+                status TEXT DEFAULT 'active',
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                UNIQUE(teacher_id, student_id)
+            );
+        """)
+        
+        # טבלת עסקאות כלכליות
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS economy_transactions (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT NOT NULL,
+                transaction_type TEXT NOT NULL,
+                amount DECIMAL(18,8) NOT NULL,
+                description TEXT,
+                related_user_id BIGINT,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+        """)
+        
+        # טבלת פעילויות לימודיות
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS learning_activities (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT NOT NULL,
+                activity_type VARCHAR(100) NOT NULL,
+                duration_minutes INTEGER NOT NULL,
+                description TEXT,
+                points_earned INTEGER DEFAULT 0,
+                coins_earned DECIMAL(18,8) DEFAULT 0,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+        """)
+        
+        # טבלת תיגמול יומי
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS daily_rewards (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT NOT NULL,
+                reward_date DATE NOT NULL,
+                base_reward DECIMAL(18,8) NOT NULL,
+                streak_bonus DECIMAL(18,8) DEFAULT 0,
+                total_reward DECIMAL(18,8) NOT NULL,
+                streak_count INTEGER NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                UNIQUE(user_id, reward_date)
+            );
+        """)
+        
+        # הכנסת משימות דוגמה אם הטבלה ריקה
+        cur.execute("SELECT COUNT(*) FROM tasks")
+        if cur.fetchone()[0] == 0:
+            sample_tasks = [
+                (1, "הצטרפות לערוץ הטלגרם", "הצטרף לערוץ הטלגרם הרשמי שלנו והשאר הודעה", 10, 5.0),
+                (2, "עקיבה אחרי טוויטר", "עקוב אחרינו בטוויטר וצייץ על הפרויקט", 15, 7.5),
+                (3, "הזמנת חבר ראשון", "הזמן חבר אחד להצטרף לבוט", 20, 10.0),
+                (4, "שיתוף בפייסבוק", "שתף את הפרויקט בדף הפייסבוק שלך", 12, 6.0),
+                (5, "צפייה בסרטון הדרכה", "צפה בסרטון הדרכה וסכם בקצרה", 8, 4.0),
+                (6, "השתתפות בדיסקורד", "הצטרף לשרת הדיסקורד והצג את עצמך", 10, 5.0),
+                (7, "כתיבת ביקורת", "כתוב ביקורת constructively על הפלטפורמה", 25, 12.5),
+                (8, "יצירת תוכן", "צור תוכן מקורי על הפרויקט (פוסט, סרטון, etc.)", 30, 15.0),
+                (9, "הזמנת 3 חברים", "הזמן 3 חברים חדשים לפרויקט", 40, 20.0),
+                (10, "הפיכת לשגריר", "הפוך לשגריר רשמי של הפרויקט", 50, 25.0)
+            ]
+            
+            for task in sample_tasks:
+                cur.execute("""
+                    INSERT INTO tasks (task_number, title, description, reward_points, reward_tokens)
+                    VALUES (%s, %s, %s, %s, %s)
+                """, task)
+        
+        conn.commit()
+        logger.info("✅ Database schema initialized successfully")
+        
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"❌ Error initializing database schema: {e}")
+        raise
+    finally:
+        cur.close()
+        conn.close()
+
+# =========================
+# פונקציות משתמשים
+# =========================
+
+def store_user(user_id: int, username: str, first_name: str, referral_code: str = None) -> bool:
+    """שומר או מעדכן משתמש במערכת"""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    
+    try:
+        cur.execute("""
+            INSERT INTO users (user_id, username, first_name, referral_code, created_at, updated_at)
+            VALUES (%s, %s, %s, %s, NOW(), NOW())
+            ON CONFLICT (user_id) 
+            DO UPDATE SET 
+                username = EXCLUDED.username,
+                first_name = EXCLUDED.first_name,
+                updated_at = NOW()
+            RETURNING user_id
+        """, (user_id, username, first_name, referral_code))
+        
+        conn.commit()
+        return True
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"Error storing user {user_id}: {e}")
         return False
-    
-    return store_user(
-        user_id=user.id,
-        username=user.username,
-        first_name=user.first_name
-    )
+    finally:
+        cur.close()
+        conn.close()
 
-# =========================
-# Handlers בסיסיים
-# =========================
-
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """פקודת /start עם הפניות"""
-    user = update.effective_user
-    if not user:
-        return
-
-    # בדיקת קוד הפניה
-    referral_code = None
-    if context.args and context.args[0].startswith('ref_'):
-        try:
-            referral_code = context.args[0].split('ref_')[1]
-            referred_by = int(referral_code)
-            if referred_by != user.id:  # מונע הפניה עצמית
-                if add_referral(referred_by, user.id):
-                    await update.message.reply_text(
-                        "🎉 הצטרפת דרך הזמנה של חבר! קיבלת 5 נקודות בונוס!"
-                    )
-        except (ValueError, IndexError):
-            pass
-
-    # רישום המשתמש
-    store_user(
-        user_id=user.id,
-        username=user.username,
-        first_name=user.first_name,
-        referral_code=referral_code
-    )
-
-    keyboard = [
-        [InlineKeyboardButton("🎯 משימות", callback_data="tasks")],
-        [InlineKeyboardButton("💰 ארנק", callback_data="wallet")],
-        [InlineKeyboardButton("📊 סטטיסטיקות", callback_data="stats")],
-        [InlineKeyboardButton("👥 הזמן חברים", callback_data="referrals")]
-    ]
-    
-    if user.id in ADMIN_IDS:
-        keyboard.append([InlineKeyboardButton("👑 ניהול", callback_data="admin")])
-    
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await update.message.reply_text(
-        f"👋 שלום {user.first_name}!\n\n"
-        f"ברוך הבא לבוט התגמולים שלנו! 🎉\n\n"
-        f"כאן תוכל:\n"
-        f"• 🎯 לבצע משימות ולקבל תגמולים\n"
-        f"• 💰 לצבור טוקנים ומטבעות\n"
-        f"• 👥 להזמין חברים ולקבל בונוסים\n\n"
-        f"לחץ על '🎯 משימות' כדי להתחיל!",
-        reply_markup=reply_markup
-    )
-
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """פקודת /help"""
-    await update.message.reply_text(
-        "📖 *מדריך שימוש*\n\n"
-        "🎯 */tasks* - הצג את כל המשימות הזמינות\n"
-        "💰 */wallet* - צפה בארנק ובטוקנים שלך\n"
-        "📊 */stats* - סטטיסטיקות אישיות\n"
-        "👥 */referrals* - הזמן חברים וקבל בונוסים\n"
-        "🆘 */help* - הצג הודעה זו\n\n"
-        "לשאלות נוספות פנה למנהלים.",
-        parse_mode="Markdown"
-    )
-
-# =========================
-# Handlers למערכת משימות
-# =========================
-
-async def tasks_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """פקודת /tasks - מציגה את כל המשימות"""
-    user = update.effective_user
-    if not user or not await ensure_user(update):
-        return
-
-    tasks = get_user_tasks(user.id)
-    progress = get_user_stats(user.id)
-    
-    text = (
-        f"🎯 *לוח משימות - התקדמות אישית*\n\n"
-        f"✅ הושלמו: {progress['completed_tasks']}/{progress['total_tasks']}\n"
-        f"📊 נקודות: {progress['total_points']}\n"
-        f"💰 טוקנים: {progress['total_tokens']}\n"
-        f"🏆 דרגה: {progress['rank']}\n\n"
-        f"*רשימת המשימות:*\n"
-    )
-    
-    keyboard = []
-    for task in tasks:
-        status_icon = "🟢" if task['user_status'] == 'approved' else "🟡" if task['user_status'] == 'submitted' else "🔵" if task['user_status'] == 'started' else "⚪"
-        text += f"{status_icon} *משימה {task['task_number']}:* {task['title']}\n"
-        text += f"   נקודות: {task['reward_points']} | טוקנים: {task['reward_tokens']}\n"
-        
-        if not task['user_status'] or task['user_status'] == 'pending':
-            text += "   ❌ לא התחלת\n"
-            keyboard.append([InlineKeyboardButton(
-                f"🚀 התחל משימה {task['task_number']}", 
-                callback_data=f"start_task:{task['task_number']}"
-            )])
-        elif task['user_status'] == 'started':
-            text += "   📝 בתהליך\n"
-            keyboard.append([InlineKeyboardButton(
-                f"📤 הגש משימה {task['task_number']}", 
-                callback_data=f"submit_task:{task['task_number']}"
-            )])
-        elif task['user_status'] == 'submitted':
-            text += "   ⏳ ממתין לאישור\n"
-        elif task['user_status'] == 'approved':
-            text += f"   ✅ אושר ב{task['approved_at'].strftime('%d/%m')}\n"
-        text += "\n"
-    
-    keyboard.append([InlineKeyboardButton("💰 ארנק", callback_data="wallet")])
-    keyboard.append([InlineKeyboardButton("🏠 חזרה לתפריט ראשי", callback_data="back_main")])
-    
-    await update.message.reply_text(
-        text,
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-
-async def start_task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """מתחיל משימה"""
-    query = update.callback_query
-    await query.answer()
-    
-    user = query.from_user
-    task_number = int(query.data.split(":")[1])
-    
-    if start_task(user.id, task_number):
-        task_info = next((t for t in get_user_tasks(user.id) if t['task_number'] == task_number), None)
-        
-        if task_info:
-            await query.edit_message_text(
-                f"🎉 *התחלת משימה {task_number}!*\n\n"
-                f"*{task_info['title']}*\n\n"
-                f"{task_info['description']}\n\n"
-                f"🎁 *תגמול:* {task_info['reward_points']} נקודות + {task_info['reward_tokens']} טוקנים\n\n"
-                f"כדי להשלים את המשימה, לחץ על 'הגש משימה' כשסיימת.",
-                parse_mode="Markdown",
-                reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton(f"📤 הגש משימה {task_number}", callback_data=f"submit_task:{task_number}"),
-                    InlineKeyboardButton("📋 חזרה לרשימה", callback_data="tasks")
-                ]])
-            )
-    else:
-        await query.answer("❌ שגיאה בהתחלת המשימה", show_alert=True)
-
-async def submit_task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """מבקש מהמשתמש להגיש הוכחה"""
-    query = update.callback_query
-    await query.answer()
-    
-    task_number = int(query.data.split(":")[1])
-    context.user_data['pending_task_submission'] = task_number
-    
-    task_info = next((t for t in get_user_tasks(query.from_user.id) if t['task_number'] == task_number), None)
-    
-    if task_info:
-        await query.edit_message_text(
-            f"📤 *הגשת משימה {task_number}: {task_info['title']}*\n\n"
-            f"שלח הודעה עם ההוכחה שהשלמת את המשימה.\n"
-            f"זה יכול להיות:\n"
-            f"• לינק לפוסט/צ'אט\n• צילום מסך\n• טקסט הסבר\n\n"
-            f"*הוכחה נדרשת:* {task_info['description']}\n\n"
-            f"ההודעה הבאה שלך תירשם כהוכחה למשימה זו.",
-            parse_mode="Markdown"
-        )
-
-async def handle_task_proof(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """מטפל בהוכחת משימה שהמשתמש שולח"""
-    user = update.effective_user
-    message = update.message
-    
-    if 'pending_task_submission' not in context.user_data:
-        return
-    
-    task_number = context.user_data['pending_task_submission']
-    proof_text = message.text or "הוכחה במדיה"
-    
-    if submit_task(user.id, task_number, proof_text):
-        # שולח למנהלים לאישור
-        admin_text = (
-            f"📝 *הגשה חדשה למשימה {task_number}*\n\n"
-            f"👤 משתמש: {user.first_name} (@{user.username})\n"
-            f"🆔 ID: {user.id}\n"
-            f"🎯 משימה: {task_number}\n"
-            f"📎 הוכחה: {proof_text[:500]}{'...' if len(proof_text) > 500 else ''}\n\n"
-            f"לאישור:\n"
-            f"`/approve_task {user.id} {task_number}`"
-        )
-        
-        for admin_id in ADMIN_IDS:
-            try:
-                await context.bot.send_message(
-                    chat_id=admin_id,
-                    text=admin_text,
-                    parse_mode="Markdown"
-                )
-            except Exception as e:
-                logger.error(f"Failed to notify admin {admin_id}: {e}")
-        
-        await message.reply_text(
-            f"✅ *המשימה {task_number} הוגשה!*\n\n"
-            f"ההוכחה נשלחה למנהלים לאישור.\n"
-            f"תקבל הודעה כשהמשימה תאושר ותקבל את הנקודות והטוקנים.",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("📋 חזרה למשימות", callback_data="tasks")
-            ]])
-        )
-        
-        del context.user_data['pending_task_submission']
-    else:
-        await message.reply_text("❌ שגיאה בהגשת המשימה. נסה שוב.")
-
-async def approve_task_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """פקודת מנהל לאישור משימה"""
-    if update.effective_user.id not in ADMIN_IDS:
-        await update.message.reply_text("❌ אין הרשאה")
-        return
-    
-    if len(context.args) != 2:
-        await update.message.reply_text("שימוש: /approve_task <user_id> <task_number>")
-        return
+def get_user_wallet(user_id: int) -> Optional[str]:
+    """מחזיר את כתובת הארנק של המשתמש"""
+    conn = get_db_connection()
+    cur = conn.cursor()
     
     try:
-        user_id = int(context.args[0])
-        task_number = int(context.args[1])
-    except ValueError:
-        await update.message.reply_text("מספרים לא תקינים")
-        return
+        cur.execute("SELECT wallet_address FROM users WHERE user_id = %s", (user_id,))
+        result = cur.fetchone()
+        return result[0] if result else None
+    except Exception as e:
+        logger.error(f"Error getting wallet for user {user_id}: {e}")
+        return None
+    finally:
+        cur.close()
+        conn.close()
+
+def update_user_wallet(user_id: int, wallet_address: str) -> bool:
+    """מעדכן את כתובת הארנק של המשתמש"""
+    conn = get_db_connection()
+    cur = conn.cursor()
     
-    if approve_task(user_id, task_number):
-        # שולח טוקנים אוטומטית אם מערכת TokenDistributor פעילה
-        wallet_address = get_user_wallet(user_id)
-        if wallet_address and token_distributor.is_connected():
-            task_info = next((t for t in get_user_tasks(user_id) if t['task_number'] == task_number), None)
-            if task_info:
-                token_amount = task_info['reward_tokens']
-                tx_hash = token_distributor.send_tokens(wallet_address, token_amount)
-                
-                if tx_hash:
-                    await update.message.reply_text(
-                        f"✅ משימה {task_number} אושרה למשתמש {user_id}!\n"
-                        f"🎁 נשלחו {task_info['reward_points']} נקודות ו-{token_amount} טוקנים\n"
-                        f"📜 TX: `{tx_hash}`",
-                        parse_mode="Markdown"
-                    )
-                else:
-                    await update.message.reply_text(
-                        f"✅ משימה {task_number} אושרה למשתמש {user_id}!\n"
-                        f"🎁 נוספו {task_info['reward_points']} נקודות\n"
-                        f"⚠️ לא נשלחו טוקנים - בעיה בחיבור ל-blockchain"
-                    )
+    try:
+        cur.execute("""
+            UPDATE users 
+            SET wallet_address = %s, updated_at = NOW()
+            WHERE user_id = %s
+        """, (wallet_address, user_id))
         
-        # הודעה למשתמש
-        try:
-            task_info = next((t for t in get_user_tasks(user_id) if t['task_number'] == task_number), None)
-            if task_info:
-                await context.bot.send_message(
-                    chat_id=user_id,
-                    text=f"🎉 *משימה {task_number} אושרה!*\n\n"
-                         f"קיבלת {task_info['reward_points']} נקודות ו-{task_info['reward_tokens']} טוקנים!\n"
-                         f"📈 continue לצבור עוד טוקנים!",
-                    parse_mode="Markdown"
-                )
-        except Exception as e:
-            logger.error(f"Failed to notify user: {e}")
-    else:
-        await update.message.reply_text("❌ שגיאה באישור המשימה. ייתכן שהמשימה לא הוגשה או כבר אושרה.")
+        conn.commit()
+        return cur.rowcount > 0
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"Error updating wallet for user {user_id}: {e}")
+        return False
+    finally:
+        cur.close()
+        conn.close()
 
 # =========================
-# Handlers ארנק וסטטיסטיקות
+# פונקציות משימות
 # =========================
 
-async def wallet_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """פקודת /wallet - מציג את מצב הארנק"""
-    user = update.effective_user
-    if not user:
-        return
-
-    stats = get_user_stats(user.id)
-    wallet_address = get_user_wallet(user.id)
+def get_user_tasks(user_id: int) -> List[Dict[str, Any]]:
+    """מחזיר את כל המשימות עם הסטטוס של המשתמש"""
+    conn = get_db_connection()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
     
-    text = (
-        f"💰 *ארנק אישי*\n\n"
-        f"👤 בעלים: {user.first_name}\n"
-        f"🆔 ID: {user.id}\n"
-    )
-    
-    if wallet_address:
-        text += f"📍 ארנק: `{wallet_address}`\n\n"
-    else:
-        text += f"📍 ארנק: *לא הוגדר* ❌\n\n"
-    
-    text += (
-        f"*מאזן:*\n"
-        f"🪙 טוקנים: {stats['total_tokens']}\n"
-        f"📊 נקודות: {stats['total_points']}\n"
-        f"🎯 משימות שהושלמו: {stats['completed_tasks']}/{stats['total_tasks']}\n"
-        f"👥 חברים שהוזמנו: {stats['referral_count']}\n\n"
-    )
-    
-    if not wallet_address:
-        text += "ℹ️ כדי לקבל טוקנים, הגדר את כתובת ה-BSC Wallet שלך עם הפקודה:\n`/set_wallet <your_bsc_address>`"
-    
-    keyboard = []
-    if not wallet_address:
-        keyboard.append([InlineKeyboardButton("🔗 הגדר ארנק", callback_data="set_wallet")])
-    
-    keyboard.extend([
-        [InlineKeyboardButton("🎯 משימות", callback_data="tasks")],
-        [InlineKeyboardButton("📊 סטטיסטיקות", callback_data="stats")],
-        [InlineKeyboardButton("🏠 חזרה", callback_data="back_main")]
-    ])
-    
-    await update.message.reply_text(
-        text,
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-
-async def set_wallet_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """פקודת /set_wallet - הגדרת ארנק BSC"""
-    user = update.effective_user
-    if not user:
-        return
-    
-    if not context.args:
-        await update.message.reply_text(
-            "שימוש: `/set_wallet <your_bsc_address>`\n\n"
-            "דוגמה: `/set_wallet 0x742E4C4F4B6B577B8B9B0C1D2E3F4A5B6C7D8E9F`",
-            parse_mode="Markdown"
-        )
-        return
-    
-    wallet_address = context.args[0]
-    
-    # וולידציה בסיסית של כתובת
-    if not wallet_address.startswith('0x') or len(wallet_address) != 42:
-        await update.message.reply_text(
-            "❌ כתובת ארנק לא תקינה. ודא שזו כתובת BSC חוקית (0x... באורך 42 תווים)"
-        )
-        return
-    
-    if update_user_wallet(user.id, wallet_address):
-        await update.message.reply_text(
-            f"✅ *ארנק עודכן בהצלחה!*\n\n"
-            f"📍 `{wallet_address}`\n\n"
-            f"כעת תוכל לקבל טוקנים למשימות שלך!",
-            parse_mode="Markdown"
-        )
-    else:
-        await update.message.reply_text("❌ שגיאה בעדכון הארנק. נסה שוב.")
-
-async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """פקודת /stats - סטטיסטיקות אישיות"""
-    user = update.effective_user
-    if not user:
-        return
-
-    stats = get_user_stats(user.id)
-    
-    text = (
-        f"📊 *סטטיסטיקות אישיות*\n\n"
-        f"👤 {user.first_name}\n"
-        f"🏆 דרגה: {stats['rank']}\n\n"
-        f"*הישגים:*\n"
-        f"🎯 משימות: {stats['completed_tasks']}/{stats['total_tasks']} ({stats['completed_tasks']/stats['total_tasks']*100:.1f}%)\n"
-        f"📊 נקודות: {stats['total_points']}\n"
-        f"🪙 טוקנים: {stats['total_tokens']}\n"
-        f"👥 הפניות: {stats['referral_count']}\n\n"
-    )
-    
-    # חישוב התקדמות
-    if stats['completed_tasks'] > 0:
-        avg_points_per_task = stats['total_points'] / stats['completed_tasks']
-        text += f"📈 ממוצע נקודות למשימה: {avg_points_per_task:.1f}\n"
-    
-    if stats['referral_count'] > 0:
-        referral_bonus = stats['referral_count'] * 5
-        text += f"🎁 בונוס הפניות: +{referral_bonus} נקודות\n"
-    
-    keyboard = [
-        [InlineKeyboardButton("🎯 משימות", callback_data="tasks")],
-        [InlineKeyboardButton("💰 ארנק", callback_data="wallet")],
-        [InlineKeyboardButton("🏠 חזרה", callback_data="back_main")]
-    ]
-    
-    await update.message.reply_text(
-        text,
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-
-# =========================
-# Handlers הפניות
-# =========================
-
-async def referrals_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """פקודת /referrals - מערכת הפניות"""
-    user = update.effective_user
-    if not user:
-        return
-
-    stats = get_user_stats(user.id)
-    bot_username = (await context.bot.get_me()).username
-    
-    text = (
-        f"👥 *הזמן חברים וקבל בונוסים!*\n\n"
-        f"📧 *קישור ההזמנה שלך:*\n"
-        f"`https://t.me/{bot_username}?start=ref_{user.id}`\n\n"
-        f"🎁 *תגמולים:*\n"
-        f"• 5 נקודות + 5 טוקנים עבור כל חבר שהצטרף\n"
-        f"• 2 נקודות נוספות עבור כל משימה שהחבר ישלים\n\n"
-        f"📊 *סטטיסטיקות הפניות:*\n"
-        f"👥 חברים שהוזמנו: {stats['referral_count']}\n"
-        f"💎 נקודות מהפניות: {stats['referral_count'] * 5}\n"
-    )
-    
-    # טופ 10 מזמינים
-    top_referrers = get_top_referrers(10)
-    if top_referrers:
-        text += f"\n🏆 *טופ 10 מזמינים:*\n"
-        for i, referrer in enumerate(top_referrers[:5], 1):
-            name = referrer['first_name'] or referrer['username'] or f"User {referrer['id']}"
-            text += f"{i}. {name}: {referrer['referral_count']} הפניות\n"
-    
-    keyboard = [
-        [InlineKeyboardButton("📋 הדגם איך להזמין", callback_data="referral_guide")],
-        [InlineKeyboardButton("🏠 חזרה", callback_data="back_main")]
-    ]
-    
-    await update.message.reply_text(
-        text,
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-
-# =========================
-# Handlers מנהל
-# =========================
-
-async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """פקודת /admin - פאנל ניהול"""
-    user = update.effective_user
-    if user.id not in ADMIN_IDS:
-        await update.message.reply_text("❌ אין הרשאה")
-        return
-    
-    pending_approvals = get_pending_approvals()
-    top_referrers = get_top_referrers(5)
-    
-    text = (
-        f"👑 *פאנל ניהול*\n\n"
-        f"📊 *סטטיסטיקות:*\n"
-        f"⏳ משימות ממתינות: {len(pending_approvals)}\n"
-        f"🏆 טופ מזמין: {top_referrers[0]['first_name'] if top_referrers else 'אין'}\n\n"
-    )
-    
-    if token_distributor.is_connected():
-        balance = token_distributor.get_token_balance()
-        text += f"💰 יתרת טוקנים: {balance}\n"
-    else:
-        text += f"⚠️ TokenDistributor לא פעיל\n"
-    
-    text += f"\n*פקודות ניהול:*\n"
-    text += f"• /approve_task <user_id> <task> - אישור משימה\n"
-    text += f"• /pending_tasks - הצג משימות ממתינות\n"
-    text += f"• /top_referrers - טופ מזמינים\n"
-    
-    keyboard = [
-        [InlineKeyboardButton("⏳ משימות ממתינות", callback_data="admin_pending")],
-        [InlineKeyboardButton("🏆 טופ מזמינים", callback_data="admin_top_ref")],
-        [InlineKeyboardButton("💰 סטטוס טוקנים", callback_data="admin_token_status")],
-        [InlineKeyboardButton("🏠 חזרה", callback_data="back_main")]
-    ]
-    
-    await update.message.reply_text(
-        text,
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-
-async def pending_tasks_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """פקודת /pending_tasks - הצג משימות ממתינות"""
-    if update.effective_user.id not in ADMIN_IDS:
-        await update.message.reply_text("❌ אין הרשאה")
-        return
-    
-    pending_approvals = get_pending_approvals()
-    
-    if not pending_approvals:
-        await update.message.reply_text("✅ אין משימות ממתינות לאישור")
-        return
-    
-    text = "⏳ *משימות ממתינות לאישור:*\n\n"
-    
-    for i, approval in enumerate(pending_approvals, 1):
-        text += (
-            f"{i}. 👤 {approval['first_name']} (@{approval['username']})\n"
-            f"   🆔 {approval['user_id']} | 🎯 משימה {approval['task_number']}\n"
-            f"   📝 {approval['title']}\n"
-            f"   📎 הוכחה: {approval['submitted_proof'][:100]}...\n"
-            f"   ⏰ הוגש: {approval['submitted_at'].strftime('%d/%m %H:%M')}\n"
-            f"   ✅ אישור: `/approve_task {approval['user_id']} {approval['task_number']}`\n\n"
-        )
-    
-    await update.message.reply_text(text, parse_mode="Markdown")
-
-# =========================
-# Callback Handlers
-# =========================
-
-async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """מטפל בכל הלחיצות על כפתורים"""
-    query = update.callback_query
-    await query.answer()
-    
-    data = query.data
-    
-    if data == "tasks":
-        await tasks_callback(update, context)
-    elif data == "wallet":
-        await wallet_callback(update, context)
-    elif data == "stats":
-        await stats_callback(update, context)
-    elif data == "referrals":
-        await referrals_callback(update, context)
-    elif data == "admin":
-        await admin_callback(update, context)
-    elif data == "back_main":
-        await start_callback(update, context)
-    elif data.startswith("start_task:"):
-        await start_task_callback(update, context)
-    elif data.startswith("submit_task:"):
-        await submit_task_callback(update, context)
-
-async def tasks_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """כפתור משימות"""
-    query = update.callback_query
-    user = query.from_user
-    
-    tasks = get_user_tasks(user.id)
-    progress = get_user_stats(user.id)
-    
-    text = (
-        f"🎯 *לוח משימות - התקדמות אישית*\n\n"
-        f"✅ הושלמו: {progress['completed_tasks']}/{progress['total_tasks']}\n"
-        f"📊 נקודות: {progress['total_points']}\n\n"
-        f"*בחר משימה:*"
-    )
-    
-    keyboard = []
-    for task in tasks[:5]:  # רק 5 הראשונות לתצוגה קומפקטית
-        status_icon = "🟢" if task['user_status'] == 'approved' else "🟡" if task['user_status'] == 'submitted' else "🔵" if task['user_status'] == 'started' else "⚪"
-        button_text = f"{status_icon} משימה {task['task_number']}"
+    try:
+        cur.execute("""
+            SELECT 
+                t.task_number,
+                t.title,
+                t.description,
+                t.reward_points,
+                t.reward_tokens,
+                COALESCE(ut.status, 'pending') as user_status,
+                ut.submitted_proof,
+                ut.submitted_at,
+                ut.approved_at
+            FROM tasks t
+            LEFT JOIN user_tasks ut ON t.task_number = ut.task_number AND ut.user_id = %s
+            WHERE t.is_active = TRUE
+            ORDER BY t.task_number
+        """, (user_id,))
         
-        if not task['user_status'] or task['user_status'] == 'pending':
-            keyboard.append([InlineKeyboardButton(
-                button_text, 
-                callback_data=f"start_task:{task['task_number']}"
-            )])
-        elif task['user_status'] == 'started':
-            keyboard.append([InlineKeyboardButton(
-                button_text + " 📤", 
-                callback_data=f"submit_task:{task['task_number']}"
-            )])
+        return cur.fetchall()
+    except Exception as e:
+        logger.error(f"Error getting tasks for user {user_id}: {e}")
+        return []
+    finally:
+        cur.close()
+        conn.close()
+
+def start_task(user_id: int, task_number: int) -> bool:
+    """מתחיל משימה עבור משתמש"""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    
+    try:
+        cur.execute("""
+            INSERT INTO user_tasks (user_id, task_number, status, created_at, updated_at)
+            VALUES (%s, %s, 'started', NOW(), NOW())
+            ON CONFLICT (user_id, task_number) 
+            DO UPDATE SET 
+                status = 'started',
+                updated_at = NOW()
+            RETURNING id
+        """, (user_id, task_number))
+        
+        conn.commit()
+        return True
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"Error starting task {task_number} for user {user_id}: {e}")
+        return False
+    finally:
+        cur.close()
+        conn.close()
+
+def submit_task(user_id: int, task_number: int, proof: str) -> bool:
+    """מגיש משימה עם הוכחה"""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    
+    try:
+        cur.execute("""
+            UPDATE user_tasks 
+            SET status = 'submitted', 
+                submitted_proof = %s,
+                submitted_at = NOW(),
+                updated_at = NOW()
+            WHERE user_id = %s AND task_number = %s
+            RETURNING id
+        """, (proof, user_id, task_number))
+        
+        conn.commit()
+        return cur.rowcount > 0
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"Error submitting task {task_number} for user {user_id}: {e}")
+        return False
+    finally:
+        cur.close()
+        conn.close()
+
+def approve_task(user_id: int, task_number: int) -> bool:
+    """מאשר משימה ומעדכן את התגמולים"""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    
+    try:
+        # תחילה, מאמתים שהמשימה הוגשה
+        cur.execute("""
+            SELECT status FROM user_tasks 
+            WHERE user_id = %s AND task_number = %s
+        """, (user_id, task_number))
+        
+        result = cur.fetchone()
+        if not result or result[0] != 'submitted':
+            return False
+        
+        # מקבלים את פרטי המשימה
+        cur.execute("""
+            SELECT reward_points, reward_tokens 
+            FROM tasks 
+            WHERE task_number = %s
+        """, (task_number,))
+        
+        task_reward = cur.fetchone()
+        if not task_reward:
+            return False
+        
+        reward_points, reward_tokens = task_reward
+        
+        # מעדכנים את סטטוס המשימה
+        cur.execute("""
+            UPDATE user_tasks 
+            SET status = 'approved', 
+                approved_at = NOW(),
+                updated_at = NOW()
+            WHERE user_id = %s AND task_number = %s
+        """, (user_id, task_number))
+        
+        # מעדכנים את הסטטיסטיקות של המשתמש
+        cur.execute("""
+            UPDATE users 
+            SET total_points = total_points + %s,
+                total_tokens = total_tokens + %s,
+                completed_tasks = completed_tasks + 1,
+                updated_at = NOW()
+            WHERE user_id = %s
+        """, (reward_points, reward_tokens, user_id))
+        
+        conn.commit()
+        return True
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"Error approving task {task_number} for user {user_id}: {e}")
+        return False
+    finally:
+        cur.close()
+        conn.close()
+
+# =========================
+# פונקציות סטטיסטיקות והפניות
+# =========================
+
+def get_user_stats(user_id: int) -> Dict[str, Any]:
+    """מחזיר סטטיסטיקות משתמש"""
+    conn = get_db_connection()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    
+    try:
+        # סטטיסטיקות בסיסיות
+        cur.execute("""
+            SELECT 
+                total_points,
+                total_tokens,
+                completed_tasks,
+                created_at
+            FROM users 
+            WHERE user_id = %s
+        """, (user_id,))
+        
+        user_data = cur.fetchone()
+        if not user_data:
+            return {}
+        
+        # מספר הפניות
+        cur.execute("""
+            SELECT COUNT(*) as referral_count 
+            FROM referrals 
+            WHERE referrer_id = %s
+        """, (user_id,))
+        
+        referral_count = cur.fetchone()['referral_count']
+        
+        # מספר משימות כולל
+        cur.execute("SELECT COUNT(*) as total_tasks FROM tasks WHERE is_active = TRUE")
+        total_tasks = cur.fetchone()['total_tasks']
+        
+        # חישוב דרגה
+        completed_tasks = user_data['completed_tasks']
+        if completed_tasks >= 8:
+            rank = "מאסטר 🏆"
+        elif completed_tasks >= 5:
+            rank = "מתקדם ⭐"
+        elif completed_tasks >= 3:
+            rank = "בינוני 🔥"
+        elif completed_tasks >= 1:
+            rank = "מתחיל 🌱"
         else:
-            keyboard.append([InlineKeyboardButton(
-                button_text + " ✅", 
-                callback_data=f"start_task:{task['task_number']}"
-            )])
-    
-    keyboard.extend([
-        [InlineKeyboardButton("💰 ארנק", callback_data="wallet")],
-        [InlineKeyboardButton("🏠 חזרה", callback_data="back_main")]
-    ])
-    
-    await query.edit_message_text(
-        text,
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-
-async def wallet_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """כפתור ארנק"""
-    query = update.callback_query
-    user = query.from_user
-    
-    stats = get_user_stats(user.id)
-    wallet_address = get_user_wallet(user.id)
-    
-    text = (
-        f"💰 *ארנק אישי*\n\n"
-        f"🪙 טוקנים: {stats['total_tokens']}\n"
-        f"📊 נקודות: {stats['total_points']}\n"
-        f"🎯 משימות: {stats['completed_tasks']}/{stats['total_tasks']}\n\n"
-    )
-    
-    if wallet_address:
-        text += f"📍 `{wallet_address[:20]}...`\n"
-    else:
-        text += "📍 *לא הוגדר* ❌\n"
-    
-    keyboard = []
-    if not wallet_address:
-        keyboard.append([InlineKeyboardButton("🔗 הגדר ארנק", callback_data="set_wallet")])
-    
-    keyboard.extend([
-        [InlineKeyboardButton("🎯 משימות", callback_data="tasks")],
-        [InlineKeyboardButton("📊 סטטיסטיקות", callback_data="stats")],
-        [InlineKeyboardButton("🏠 חזרה", callback_data="back_main")]
-    ])
-    
-    await query.edit_message_text(
-        text,
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-
-async def stats_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """כפתור סטטיסטיקות"""
-    query = update.callback_query
-    user = query.from_user
-    
-    stats = get_user_stats(user.id)
-    
-    text = (
-        f"📊 *סטטיסטיקות אישיות*\n\n"
-        f"🏆 {stats['rank']}\n\n"
-        f"🎯 {stats['completed_tasks']}/{stats['total_tasks']} משימות\n"
-        f"📊 {stats['total_points']} נקודות\n"
-        f"🪙 {stats['total_tokens']} טוקנים\n"
-        f"👥 {stats['referral_count']} הפניות\n\n"
-        f"המשך בקצב הזה! 💪"
-    )
-    
-    keyboard = [
-        [InlineKeyboardButton("🎯 משימות", callback_data="tasks")],
-        [InlineKeyboardButton("💰 ארנק", callback_data="wallet")],
-        [InlineKeyboardButton("🏠 חזרה", callback_data="back_main")]
-    ]
-    
-    await query.edit_message_text(
-        text,
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-
-async def referrals_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """כפתור הפניות"""
-    query = update.callback_query
-    user = query.from_user
-    
-    stats = get_user_stats(user.id)
-    bot_username = (await context.bot.get_me()).username
-    
-    text = (
-        f"👥 *הזמן חברים*\n\n"
-        f"📧 *קישור הזמנה:*\n"
-        f"`https://t.me/{bot_username}?start=ref_{user.id}`\n\n"
-        f"🎁 5 נקודות + 5 טוקנים לחבר\n"
-        f"📈 {stats['referral_count']} חברים הוזמנו\n"
-        f"💎 {stats['referral_count'] * 5} נקודות בונוס"
-    )
-    
-    keyboard = [
-        [InlineKeyboardButton("🎯 משימות", callback_data="tasks")],
-        [InlineKeyboardButton("🏠 חזרה", callback_data="back_main")]
-    ]
-    
-    await query.edit_message_text(
-        text,
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-
-async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """כפתור ניהול"""
-    query = update.callback_query
-    user = query.from_user
-    
-    if user.id not in ADMIN_IDS:
-        await query.answer("❌ אין הרשאה", show_alert=True)
-        return
-    
-    pending_approvals = get_pending_approvals()
-    
-    text = (
-        f"👑 *פאנל ניהול*\n\n"
-        f"⏳ {len(pending_approvals)} משימות ממתינות\n"
-        f"👤 {user.first_name}\n\n"
-        f"בחר פעולה:"
-    )
-    
-    keyboard = [
-        [InlineKeyboardButton("⏳ משימות ממתינות", callback_data="admin_pending")],
-        [InlineKeyboardButton("🏆 טופ מזמינים", callback_data="admin_top_ref")],
-        [InlineKeyboardButton("🔙 חזרה", callback_data="back_main")]
-    ]
-    
-    await query.edit_message_text(
-        text,
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-
-async def start_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """כפתור חזרה לתפריט ראשי"""
-    query = update.callback_query
-    user = query.from_user
-    
-    keyboard = [
-        [InlineKeyboardButton("🎯 משימות", callback_data="tasks")],
-        [InlineKeyboardButton("💰 ארנק", callback_data="wallet")],
-        [InlineKeyboardButton("📊 סטטיסטיקות", callback_data="stats")],
-        [InlineKeyboardButton("👥 הזמן חברים", callback_data="referrals")]
-    ]
-    
-    if user.id in ADMIN_IDS:
-        keyboard.append([InlineKeyboardButton("👑 ניהול", callback_data="admin")])
-    
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await query.edit_message_text(
-        f"👋 שלום {user.first_name}!\n\n"
-        f"מה תרצה לעשות?",
-        reply_markup=reply_markup
-    )
-
-# =========================
-# הרשמת Handlers
-# =========================
-
-def register_handlers():
-    """מרשם את כל ה-handlers"""
-    # handlers בסיסיים
-    ptb_app.add_handler(CommandHandler("start", start_command))
-    ptb_app.add_handler(CommandHandler("help", help_command))
-    ptb_app.add_handler(CommandHandler("tasks", tasks_command))
-    ptb_app.add_handler(CommandHandler("wallet", wallet_command))
-    ptb_app.add_handler(CommandHandler("stats", stats_command))
-    ptb_app.add_handler(CommandHandler("referrals", referrals_command))
-    ptb_app.add_handler(CommandHandler("set_wallet", set_wallet_command))
-    
-    # handlers מנהל
-    ptb_app.add_handler(CommandHandler("admin", admin_command))
-    ptb_app.add_handler(CommandHandler("pending_tasks", pending_tasks_command))
-    ptb_app.add_handler(CommandHandler("approve_task", approve_task_command))
-    
-    # handlers למערכת משימות
-    ptb_app.add_handler(CallbackQueryHandler(start_task_callback, pattern="^start_task:"))
-    ptb_app.add_handler(CallbackQueryHandler(submit_task_callback, pattern="^submit_task:"))
-    ptb_app.add_handler(MessageHandler(filters.TEXT & filters.ChatType.PRIVATE, handle_task_proof))
-    
-    # handlers כלליים
-    ptb_app.add_handler(CallbackQueryHandler(handle_callback))
-
-# =========================
-# FastAPI & Webhook
-# =========================
-
-from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
-
-app = FastAPI()
-
-@app.on_event("startup")
-async def startup_event():
-    """אתחול הבוט בעת הפעלת האפליקציה"""
-    try:
-        await ptb_app.initialize()
-        await ptb_app.bot.set_webhook(url=f"{WEBHOOK_URL}/webhook")
-        register_handlers()
-        logger.info("🤖 Bot started successfully!")
-        logger.info(f"🌐 Webhook URL: {WEBHOOK_URL}/webhook")
-        logger.info(f"👑 Admin IDs: {ADMIN_IDS}")
+            rank = "חדש 👶"
+        
+        return {
+            'total_points': user_data['total_points'],
+            'total_tokens': float(user_data['total_tokens']),
+            'completed_tasks': user_data['completed_tasks'],
+            'total_tasks': total_tasks,
+            'referral_count': referral_count,
+            'rank': rank,
+            'member_since': user_data['created_at'].strftime('%d/%m/%Y')
+        }
     except Exception as e:
-        logger.error(f"❌ Failed to start bot: {e}")
+        logger.error(f"Error getting stats for user {user_id}: {e}")
+        return {}
+    finally:
+        cur.close()
+        conn.close()
 
-@app.on_event("shutdown")
-async def shutdown_event():
-    """ניקוי משאבים בעת כיבוי"""
-    try:
-        await ptb_app.shutdown()
-        logger.info("🤖 Bot shutdown successfully")
-    except Exception as e:
-        logger.error(f"❌ Error during shutdown: {e}")
-
-@app.post("/webhook")
-async def webhook(request: Request):
-    """Endpoint ל-webhook של Telegram"""
-    try:
-        data = await request.json()
-        update = Update.de_json(data, ptb_app.bot)
-        await ptb_app.process_update(update)
-        return JSONResponse(content={"status": "ok"})
-    except Exception as e:
-        logger.error(f"❌ Webhook error: {e}")
-        return JSONResponse(content={"status": "error"}, status_code=500)
-
-@app.get("/")
-async def root():
-    """Health check endpoint"""
-    return {
-        "status": "online", 
-        "service": "webwook-bot",
-        "timestamp": datetime.now().isoformat(),
-        "version": "2.0"
-    }
-
-@app.get("/health")
-async def health():
-    """Health check endpoint"""
-    db_status = "connected" if os.environ.get("DATABASE_URL") else "disconnected"
-    blockchain_status = "connected" if token_distributor.is_connected() else "disconnected"
+def add_referral(referrer_id: int, referred_id: int) -> bool:
+    """מוסיף הפניה חדשה ומעדכן בונוסים"""
+    conn = get_db_connection()
+    cur = conn.cursor()
     
-    return {
-        "status": "healthy",
-        "database": db_status,
-        "blockchain": blockchain_status,
-        "timestamp": datetime.now().isoformat()
-    }
+    try:
+        # מוסיף את ההפניה
+        cur.execute("""
+            INSERT INTO referrals (referrer_id, referred_id, created_at)
+            VALUES (%s, %s, NOW())
+            ON CONFLICT (referrer_id, referred_id) DO NOTHING
+            RETURNING id
+        """, (referrer_id, referred_id))
+        
+        if cur.rowcount == 0:
+            return False  # ההפניה כבר קיימת
+        
+        # מוסיף בונוס למזמין
+        cur.execute("""
+            UPDATE users 
+            SET total_points = total_points + 5,
+                total_tokens = total_tokens + 5,
+                updated_at = NOW()
+            WHERE user_id = %s
+        """, (referrer_id,))
+        
+        conn.commit()
+        return True
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"Error adding referral from {referrer_id} to {referred_id}: {e}")
+        return False
+    finally:
+        cur.close()
+        conn.close()
 
-@app.get("/debug")
-async def debug():
-    """Debug endpoint"""
-    pending_approvals = get_pending_approvals()
-    top_referrers = get_top_referrers(3)
+def get_top_referrers(limit: int = 10) -> List[Dict[str, Any]]:
+    """מחזיר את הטופ מזמינים"""
+    conn = get_db_connection()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
     
-    return {
-        "pending_approvals": len(pending_approvals),
-        "top_referrers": [{"name": r["first_name"], "count": r["referral_count"]} for r in top_referrers],
-        "blockchain_connected": token_distributor.is_connected(),
-        "admin_ids": ADMIN_IDS
-    }
-# ב-db.py - הוסף לאחר הטבלאות הקיימות
+    try:
+        cur.execute("""
+            SELECT 
+                u.user_id,
+                u.first_name,
+                u.username,
+                COUNT(r.id) as referral_count
+            FROM users u
+            JOIN referrals r ON u.user_id = r.referrer_id
+            GROUP BY u.user_id, u.first_name, u.username
+            ORDER BY referral_count DESC
+            LIMIT %s
+        """, (limit,))
+        
+        return cur.fetchall()
+    except Exception as e:
+        logger.error(f"Error getting top referrers: {e}")
+        return []
+    finally:
+        cur.close()
+        conn.close()
 
-# טבלת מנויים ותשלומים
-cur.execute("""
-    CREATE TABLE IF NOT EXISTS subscriptions (
-        id SERIAL PRIMARY KEY,
-        user_id BIGINT NOT NULL,
-        amount DECIMAL(10,2) NOT NULL,
-        status TEXT NOT NULL DEFAULT 'pending',
-        payment_method TEXT,
-        transaction_id TEXT,
-        access_granted BOOLEAN DEFAULT FALSE,
-        group_access BOOLEAN DEFAULT FALSE,
-        expires_at TIMESTAMPTZ,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    );
-""")
+def get_pending_approvals() -> List[Dict[str, Any]]:
+    """מחזיר את כל המשימות הממתינות לאישור"""
+    conn = get_db_connection()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    
+    try:
+        cur.execute("""
+            SELECT 
+                ut.user_id,
+                ut.task_number,
+                ut.submitted_proof,
+                ut.submitted_at,
+                u.first_name,
+                u.username,
+                t.title
+            FROM user_tasks ut
+            JOIN users u ON ut.user_id = u.user_id
+            JOIN tasks t ON ut.task_number = t.task_number
+            WHERE ut.status = 'submitted'
+            ORDER BY ut.submitted_at ASC
+        """)
+        
+        return cur.fetchall()
+    except Exception as e:
+        logger.error(f"Error getting pending approvals: {e}")
+        return []
+    finally:
+        cur.close()
+        conn.close()
 
-# טבלת כלכלת משתמשים
-cur.execute("""
-    CREATE TABLE IF NOT EXISTS user_economy (
-        user_id BIGINT PRIMARY KEY,
-        academy_coins DECIMAL(18,8) DEFAULT 0,
-        learning_points INT DEFAULT 0,
-        teaching_points INT DEFAULT 0,
-        leadership_level INT DEFAULT 1,
-        total_earnings DECIMAL(18,8) DEFAULT 0,
-        daily_streak INT DEFAULT 0,
-        last_activity_date DATE,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    );
-""")
+def get_user_progress(user_id: int) -> Dict[str, Any]:
+    """מחזיר התקדמות משתמש (לא בשימוש כרגע אבל נשמר לתאימות)"""
+    return get_user_stats(user_id)
 
-# טבלת רשת לימודית
-cur.execute("""
-    CREATE TABLE IF NOT EXISTS learning_network (
-        id SERIAL PRIMARY KEY,
-        teacher_id BIGINT NOT NULL,
-        student_id BIGINT NOT NULL,
-        level INT DEFAULT 1,
-        coins_earned DECIMAL(18,8) DEFAULT 0,
-        status TEXT DEFAULT 'active',
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        UNIQUE(teacher_id, student_id)
-    );
-""")
+# =========================
+# פונקציות כלכלה
+# =========================
 
-# טבלת עסקאות כלכליות
-cur.execute("""
-    CREATE TABLE IF NOT EXISTS economy_transactions (
-        id SERIAL PRIMARY KEY,
-        user_id BIGINT NOT NULL,
-        transaction_type TEXT NOT NULL,
-        amount DECIMAL(18,8) NOT NULL,
-        description TEXT,
-        related_user_id BIGINT,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    );
-""")
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=PORT)
+def init_user_economy(user_id: int) -> bool:
+    """מאתחל רשומה כלכלית למשתמש"""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    
+    try:
+        cur.execute("""
+            INSERT INTO user_economy (user_id, created_at, updated_at)
+            VALUES (%s, NOW(), NOW())
+            ON CONFLICT (user_id) DO NOTHING
+            RETURNING user_id
+        """, (user_id,))
+        
+        conn.commit()
+        return True
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"Error initializing economy for user {user_id}: {e}")
+        return False
+    finally:
+        cur.close()
+        conn.close()
+
+def get_user_economy_stats(user_id: int) -> Dict[str, Any]:
+    """מחזיר סטטיסטיקות כלכלה למשתמש"""
+    conn = get_db_connection()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    
+    try:
+        cur.execute("""
+            SELECT 
+                academy_coins,
+                learning_points,
+                teaching_points,
+                leadership_level,
+                total_earnings,
+                daily_streak,
+                last_activity_date
+            FROM user_economy 
+            WHERE user_id = %s
+        """, (user_id,))
+        
+        economy_data = cur.fetchone()
+        if not economy_data:
+            init_user_economy(user_id)
+            return get_user_economy_stats(user_id)
+        
+        # חישוב שם דרגה
+        level = economy_data['leadership_level']
+        level_names = {
+            1: "מתחיל 🌱",
+            2: "לומד 📚", 
+            3: "מתרגל 💪",
+            4: "מתקדם ⭐",
+            5: "מומחה 🔥",
+            6: "מאסטר 🏆",
+            7: "גורו 🌟",
+            8: "לגנדרי ✨"
+        }
+        
+        level_name = level_names.get(level, "מתחיל 🌱")
+        level_multiplier = 1.0 + (level - 1) * 0.1
+        
+        # מספר תלמידים
+        cur.execute("""
+            SELECT COUNT(*) as student_count 
+            FROM learning_network 
+            WHERE teacher_id = %s AND status = 'active'
+        """, (user_id,))
+        
+        student_count = cur.fetchone()['student_count']
+        next_level_students_needed = level * 2
+        
+        return {
+            'academy_coins': float(economy_data['academy_coins']),
+            'learning_points': economy_data['learning_points'],
+            'teaching_points': economy_data['teaching_points'],
+            'leadership_level': level,
+            'level_name': level_name,
+            'level_multiplier': level_multiplier,
+            'total_earnings': float(economy_data['total_earnings']),
+            'daily_streak': economy_data['daily_streak'],
+            'student_count': student_count,
+            'next_level_students_needed': next_level_students_needed
+        }
+    except Exception as e:
+        logger.error(f"Error getting economy stats for user {user_id}: {e}")
+        return {}
+    finally:
+        cur.close()
+        conn.close()
+
+def update_user_economy(user_id: int, updates: Dict[str, Any]) -> bool:
+    """מעדכן את הנתונים הכלכליים של משתמש"""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    
+    try:
+        set_clause = ", ".join([f"{key} = %s" for key in updates.keys()])
+        values = list(updates.values())
+        values.append(user_id)
+        
+        query = f"""
+            UPDATE user_economy 
+            SET {set_clause}, updated_at = NOW()
+            WHERE user_id = %s
+        """
+        
+        cur.execute(query, values)
+        conn.commit()
+        return cur.rowcount > 0
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"Error updating economy for user {user_id}: {e}")
+        return False
+    finally:
+        cur.close()
+        conn.close()
+
+def add_economy_transaction(user_id: int, transaction_type: str, amount: float, description: str = None, related_user_id: int = None) -> bool:
+    """מוסיף עסקה כלכלית חדשה"""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    
+    try:
+        cur.execute("""
+            INSERT INTO economy_transactions 
+            (user_id, transaction_type, amount, description, related_user_id, created_at)
+            VALUES (%s, %s, %s, %s, %s, NOW())
+        """, (user_id, transaction_type, amount, description, related_user_id))
+        
+        conn.commit()
+        return True
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"Error adding economy transaction for user {user_id}: {e}")
+        return False
+    finally:
+        cur.close()
+        conn.close()
+
+def get_network_stats(user_id: int) -> Dict[str, Any]:
+    """מחזיר סטטיסטיקות רשת למשתמש"""
+    conn = get_db_connection()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    
+    try:
+        # תלמידים לפי רמות
+        cur.execute("""
+            SELECT 
+                level,
+                COUNT(*) as student_count,
+                SUM(coins_earned) as level_earnings
+            FROM learning_network 
+            WHERE teacher_id = %s AND status = 'active'
+            GROUP BY level
+            ORDER BY level
+        """, (user_id,))
+        
+        level_stats = cur.fetchall()
+        
+        level_1_students = 0
+        level_2_students = 0  
+        level_3_students = 0
+        total_network_earnings = 0
+        
+        for stat in level_stats:
+            if stat['level'] == 1:
+                level_1_students = stat['student_count']
+            elif stat['level'] == 2:
+                level_2_students = stat['student_count']
+            elif stat['level'] == 3:
+                level_3_students = stat['student_count']
+            
+            total_network_earnings += float(stat['level_earnings'] or 0)
+        
+        return {
+            'level_1_students': level_1_students,
+            'level_2_students': level_2_students,
+            'level_3_students': level_3_students,
+            'total_network_earnings': total_network_earnings
+        }
+    except Exception as e:
+        logger.error(f"Error getting network stats for user {user_id}: {e}")
+        return {}
+    finally:
+        cur.close()
+        conn.close()
+
+# =========================
+# פונקציות לפעילויות לימודיות
+# =========================
+
+def add_learning_activity(user_id: int, activity_type: str, duration: int, description: str = None) -> Dict[str, Any]:
+    """מוסיף פעילות לימודית חדשה"""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    
+    try:
+        # חישוב נקודות ומטבעות
+        base_points = min(duration // 5, 10)  # מקסימום 10 נקודות
+        base_coins = duration * 0.1  # 0.1 coin per minute
+        
+        # עדכון הכלכלה של המשתמש
+        cur.execute("""
+            UPDATE user_economy 
+            SET learning_points = learning_points + %s,
+                academy_coins = academy_coins + %s,
+                total_earnings = total_earnings + %s,
+                updated_at = NOW()
+            WHERE user_id = %s
+        """, (base_points, base_coins, base_coins, user_id))
+        
+        # הוספת הפעילות
+        cur.execute("""
+            INSERT INTO learning_activities 
+            (user_id, activity_type, duration_minutes, description, points_earned, coins_earned, created_at)
+            VALUES (%s, %s, %s, %s, %s, %s, NOW())
+        """, (user_id, activity_type, duration, description, base_points, base_coins))
+        
+        # הוספת עסקה כלכלית
+        add_economy_transaction(
+            user_id, 
+            'learning_activity', 
+            base_coins, 
+            f'{activity_type} - {duration} minutes',
+            None
+        )
+        
+        conn.commit()
+        
+        return {
+            'success': True,
+            'points_earned': base_points,
+            'coins_earned': base_coins,
+            'activity_type': activity_type
+        }
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"Error adding learning activity for user {user_id}: {e}")
+        return {'success': False, 'error': str(e)}
+    finally:
+        cur.close()
+        conn.close()
+
+def claim_daily_reward(user_id: int) -> Dict[str, Any]:
+    """מעבד תיגמול יומי"""
+    conn = get_db_connection()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    
+    try:
+        today = datetime.now().date()
+        
+        # בודק אם כבר קיבל היום
+        cur.execute("""
+            SELECT * FROM daily_rewards 
+            WHERE user_id = %s AND reward_date = %s
+        """, (user_id, today))
+        
+        if cur.fetchone():
+            return {'success': False, 'message': 'כבר קיבלת את התיגמול היומי היום!'}
+        
+        # בודק את הסטריק הנוכחי
+        cur.execute("""
+            SELECT streak_count, reward_date 
+            FROM daily_rewards 
+            WHERE user_id = %s 
+            ORDER BY reward_date DESC 
+            LIMIT 1
+        """, (user_id,))
+        
+        last_reward = cur.fetchone()
+        
+        if last_reward and last_reward['reward_date'] == today - timedelta(days=1):
+            current_streak = last_reward['streak_count'] + 1
+        else:
+            current_streak = 1
+        
+        # חישוב התגמול
+        base_reward = 1.0
+        streak_bonus = min(current_streak * 0.1, 2.0)  # מקסימום בונוס 2.0
+        total_reward = base_reward + streak_bonus
+        
+        # שמירת התיגמול
+        cur.execute("""
+            INSERT INTO daily_rewards 
+            (user_id, reward_date, base_reward, streak_bonus, total_reward, streak_count, created_at)
+            VALUES (%s, %s, %s, %s, %s, %s, NOW())
+        """, (user_id, today, base_reward, streak_bonus, total_reward, current_streak))
+        
+        # עדכון הכלכלה של המשתמש
+        cur.execute("""
+            UPDATE user_economy 
+            SET academy_coins = academy_coins + %s,
+                total_earnings = total_earnings + %s,
+                daily_streak = %s,
+                last_activity_date = %s,
+                updated_at = NOW()
+            WHERE user_id = %s
+        """, (total_reward, total_reward, current_streak, today, user_id))
+        
+        # הוספת עסקה כלכלית
+        add_economy_transaction(
+            user_id, 
+            'daily_reward', 
+            total_reward, 
+            f'Daily reward - streak {current_streak}',
+            None
+        )
+        
+        conn.commit()
+        
+        return {
+            'success': True,
+            'reward': total_reward,
+            'base_reward': base_reward,
+            'streak_bonus': streak_bonus,
+            'new_streak': current_streak
+        }
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"Error claiming daily reward for user {user_id}: {e}")
+        return {'success': False, 'error': str(e)}
+    finally:
+        cur.close()
+        conn.close()
+
+def add_teaching_reward(teacher_id: int, student_id: int, reward_type: str) -> bool:
+    """מוסיף תגמול הוראה למורה"""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    
+    try:
+        reward_amount = 2.0 if reward_type == 'referral' else 1.0
+        
+        # עדכון הכלכלה של המורה
+        cur.execute("""
+            UPDATE user_economy 
+            SET teaching_points = teaching_points + 1,
+                academy_coins = academy_coins + %s,
+                total_earnings = total_earnings + %s,
+                updated_at = NOW()
+            WHERE user_id = %s
+        """, (reward_amount, reward_amount, teacher_id))
+        
+        # הוספת לרשת הלימודית או עדכון
+        cur.execute("""
+            INSERT INTO learning_network (teacher_id, student_id, level, coins_earned, status, created_at)
+            VALUES (%s, %s, 1, %s, 'active', NOW())
+            ON CONFLICT (teacher_id, student_id) 
+            DO UPDATE SET 
+                coins_earned = learning_network.coins_earned + EXCLUDED.coins_earned,
+                updated_at = NOW()
+        """, (teacher_id, student_id, reward_amount))
+        
+        # הוספת עסקה כלכלית
+        add_economy_transaction(
+            teacher_id, 
+            'teaching_reward', 
+            reward_amount, 
+            f'{reward_type} - student {student_id}',
+            student_id
+        )
+        
+        conn.commit()
+        return True
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"Error adding teaching reward for teacher {teacher_id}: {e}")
+        return False
+    finally:
+        cur.close()
+        conn.close()
