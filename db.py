@@ -93,16 +93,14 @@ def init_schema():
         
         # טבלת מנויים ותשלומים
         cur.execute("""
-            CREATE TABLE IF NOT EXISTS subscriptions (
+            CREATE TABLE IF NOT EXISTS payments (
                 id SERIAL PRIMARY KEY,
                 user_id BIGINT NOT NULL,
                 amount DECIMAL(10,2) NOT NULL,
-                status TEXT NOT NULL DEFAULT 'pending',
-                payment_method TEXT,
-                transaction_id TEXT,
-                access_granted BOOLEAN DEFAULT FALSE,
-                group_access BOOLEAN DEFAULT FALSE,
-                expires_at TIMESTAMPTZ,
+                status VARCHAR(20) DEFAULT 'pending',
+                payment_method VARCHAR(50),
+                transaction_id VARCHAR(100),
+                group_access_granted BOOLEAN DEFAULT FALSE,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             );
@@ -177,21 +175,6 @@ def init_schema():
                 streak_count INTEGER NOT NULL,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 UNIQUE(user_id, reward_date)
-            );
-        """)
-        
-        # טבלת תשלומים
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS payments (
-                id SERIAL PRIMARY KEY,
-                user_id BIGINT NOT NULL,
-                amount DECIMAL(10,2) NOT NULL,
-                status VARCHAR(20) DEFAULT 'pending',
-                payment_method VARCHAR(50),
-                transaction_id VARCHAR(100),
-                group_access_granted BOOLEAN DEFAULT FALSE,
-                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             );
         """)
         
