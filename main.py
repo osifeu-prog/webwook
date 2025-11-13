@@ -12,7 +12,7 @@ from db import (
     store_user, get_user_wallet, update_user_wallet,
     get_user_tasks, start_task, submit_task, approve_task, 
     get_user_stats, add_referral, get_top_referrers, get_pending_approvals,
-    get_user_progress, init_schema
+    get_user_progress, init_schema, create_payment, approve_payment, has_paid_access
 )
 from token_distributor import token_distributor
 from config import BotConfig, TaskConfig
@@ -56,12 +56,6 @@ async def ensure_user(update: Update) -> bool:
         academy_economy.init_user_economy(user.id)
     
     return success
-
-def has_premium_access(user_id: int) -> bool:
-    """בודק אם למשתמש יש גישת פרימיום"""
-    # TODO: implement premium access check from database
-    # For now, return True for testing
-    return True
 
 # =========================
 # Handlers בסיסיים
@@ -119,8 +113,14 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         f"3. מתקדמים בדרגות Leadership 🏆\n"
         f"4. ממירים ל-tokens אמיתיים 💰\n\n"
         
-        f"🚀 *האקדמיה שייכת לך* - אתה בונה נכס דיגיטלי שיכול להניב הכנסות!\n\n"
-        f"מוכן להתחיל במסע? 🌟"
+        f"🚀 *גישה מלאה לאקדמיה:*\n"
+        f"• עלות: 444 ש\"ח\n"
+        f"• קבוצת לימוד פרטית: https://t.me/+WaA_aHzbwlU4MjNk\n"
+        f"• תמיכה אישית\n"
+        f"• 100 Academy Coins מתנה!\n\n"
+        
+        f"💼 *זכור:* האקדמיה היא *הנכס הדיגיטלי שלך*!\n"
+        f"אתה בונה כאן עסק משלים שיכול להניב הכנסות פסיביות דרך כלכלת המשחק."
     )
 
     keyboard = [
@@ -157,6 +157,234 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "לשאלות נוספות פנה למנהלים.",
         parse_mode="Markdown"
     )
+
+# =========================
+# Handlers הפניות
+# =========================
+
+async def referrals_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """פקודת /referrals - הזמנת חברים"""
+    user = update.effective_user
+    if not user:
+        return
+
+    stats = get_user_stats(user.id)
+    bot_username = (await context.bot.get_me()).username
+    
+    text = (
+        f"👥 *הזמן חברים - קבל בונוסים!*\n\n"
+        f"📧 *קישור הזמנה אישי:*\n"
+        f"`https://t.me/{bot_username}?start=ref_{user.id}`\n\n"
+        f"🎁 *מה תקבל:*\n"
+        f"• 5 נקודות לכל חבר שהצטרף\n"
+        f"• 5 טוקנים לכל חבר שהצטרף\n"
+        f"• 2 Academy Coins לכל חבר שהצטרף\n\n"
+        f"📈 *סטטיסטיקות ההפניות שלך:*\n"
+        f"• {stats['referral_count']} חברים הוזמנו\n"
+        f"• {stats['referral_count'] * 5} נקודות בונוס\n"
+        f"• {stats['referral_count'] * 5} טוקנים בונוס\n\n"
+        f"💎 *הזמן עוד חברים ותרוויח יותר!*"
+    )
+    
+    keyboard = [
+        [InlineKeyboardButton("🎯 חזרה לתפריט", callback_data="back_main")]
+    ]
+    
+    await update.message.reply_text(
+        text,
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+# =========================
+# Handlers מנהל
+# =========================
+
+async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """פקודת /admin - פאנל ניהול"""
+    user = update.effective_user
+    if user.id not in ADMIN_IDS:
+        await update.message.reply_text("❌ אין הרשאה")
+        return
+    
+    pending_approvals = get_pending_approvals()
+    top_referrers = get_top_referrers(5)
+    
+    text = (
+        f"👑 *פאנל ניהול - אקדמיה דיגיטלית*\n\n"
+        f"📊 *סטטיסטיקות מערכת:*\n"
+        f"• ⏳ {len(pending_approvals)} משימות ממתינות לאישור\n"
+        f"• 👤 {len(top_referrers)} מובילים בהפניות\n\n"
+        
+        f"📋 *פקודות מנהל זמינות:*\n"
+        f"• /pending_tasks - הצג משימות ממתינות\n"
+        f"• /approve_task <user_id> <task_number> - אשר משימה\n"
+        f"• /group_info - מידע על הקבוצה\n"
+        f"• /broadcast <message> - שליחת הודעה לכל המשתמשים\n\n"
+        
+        f"🔧 *ניהול מערכת:*\n"
+        f"• /stats - סטטיסטיקות מערכת\n"
+        f"• /backup - גיבוי נתונים\n"
+    )
+    
+    keyboard = [
+        [InlineKeyboardButton("⏳ משימות ממתינות", callback_data="admin_pending")],
+        [InlineKeyboardButton("🏆 טופ מזמינים", callback_data="admin_top_ref")],
+        [InlineKeyboardButton("👥 מידע קבוצה", callback_data="admin_group_info")],
+        [InlineKeyboardButton("🔙 חזרה", callback_data="back_main")]
+    ]
+    
+    await update.message.reply_text(
+        text,
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+async def pending_tasks_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """פקודת /pending_tasks - הצגת משימות ממתינות"""
+    user = update.effective_user
+    if user.id not in ADMIN_IDS:
+        await update.message.reply_text("❌ אין הרשאה")
+        return
+    
+    pending_tasks = get_pending_approvals()
+    
+    if not pending_tasks:
+        await update.message.reply_text("✅ אין משימות ממתינות לאישור")
+        return
+    
+    text = "⏳ *משימות ממתינות לאישור:*\n\n"
+    
+    for i, task in enumerate(pending_tasks[:10], 1):  # מוגבל ל-10 משימות
+        text += (
+            f"*{i}. משימה {task['task_number']} - {task['title']}*\n"
+            f"👤 {task['first_name']} (@{task['username'] or 'ללא'})\n"
+            f"🆔 {task['user_id']}\n"
+            f"📝 {task['submitted_proof'][:100]}{'...' if len(task['submitted_proof']) > 100 else ''}\n"
+            f"⏰ {task['submitted_at'].strftime('%d/%m/%Y %H:%M')}\n"
+            f"`/approve_task {task['user_id']} {task['task_number']}`\n\n"
+        )
+    
+    if len(pending_tasks) > 10:
+        text += f"*... ועוד {len(pending_tasks) - 10} משימות*"
+    
+    await update.message.reply_text(text, parse_mode="Markdown")
+
+async def group_info_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """פקודת /group_info - מידע על הקבוצה"""
+    user = update.effective_user
+    if user.id not in ADMIN_IDS:
+        await update.message.reply_text("❌ אין הרשאה")
+        return
+    
+    group_link = "https://t.me/+WaA_aHzbwlU4MjNk"
+    
+    text = (
+        f"👥 *מידע קבוצת האקדמיה*\n\n"
+        f"🔗 *קישור קבוצה:*\n"
+        f"{group_link}\n\n"
+        f"📊 *סטטיסטיקות:*\n"
+        f"• קישור קבוצה: פעיל ✅\n"
+        f"• קבוצה פרטית: כן ✅\n"
+        f"• גישה: למשתתפים בלבד 🔒\n\n"
+        f"💡 *הנחיות:*\n"
+        f"1. הקבוצה מיועדת למשתתפים ששילמו 444 ש\"ח\n"
+        f"2. יש לאשר משתתפים ידנית\n"
+        f"3. שמור על הקבוצה פעילה ואיכותית\n"
+    )
+    
+    keyboard = [
+        [InlineKeyboardButton("🔗 פתח קבוצה", url=group_link)],
+        [InlineKeyboardButton("👑 חזרה לניהול", callback_data="admin")]
+    ]
+    
+    await update.message.reply_text(
+        text,
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+# =========================
+# Handlers תשלומים והצטרפות
+# =========================
+
+async def payment_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """פקודת /payment - הרשמה לאקדמיה"""
+    user = update.effective_user
+    
+    # בדיקה אם כבר יש גישה
+    if has_paid_access(user.id):
+        await update.message.reply_text(
+            "✅ *כבר יש לך גישה מלאה לאקדמיה!*\n\n"
+            "🔗 קבוצת האקדמיה: https://t.me/+WaA_aHzbwlU4MjNk\n\n"
+            "💎 המשך ללמוד ולהרוויח!",
+            parse_mode="Markdown"
+        )
+        return
+    
+    text = (
+        f"🎓 *הצטרפות לאקדמיה - השקעה בעצמך!*\n\n"
+        
+        f"💼 *מה מקבלים?*\n"
+        f"• גישה מלאה לבוט האקדמיה 🎯\n"
+        f"• הצטרפות לקבוצה הפרטית: https://t.me/+WaA_aHzbwlU4MjNk 👥\n"
+        f"• נכס דיגיטלי לכל החיים 📚\n"
+        f"• יכולת לצרף משתתפים ולבנות רשת 🕸️\n"
+        f"• מערכת מעקב והתקדמות מתקדמת 📊\n"
+        f"• 100 Academy Coins עם ההצטרפות 💎\n\n"
+        
+        f"💰 *השקעה:* 444 ש\"ח\n\n"
+        
+        f"🏦 *איך משלמים?*\n"
+        f"1. העברה 444 ש\"ח לחשבון הבא:\n"
+        f"   בנק: ______\n"
+        f"   סניף: ______\n"
+        f"   חשבון: ______\n\n"
+        
+        f"2. שלח אישור תשלום עם השם שלך\n"
+        f"3. נאשר בתוך 24 שעות\n\n"
+        
+        f"🚀 *זכור:* האקדמיה היא *הנכס הדיגיטלי שלך*!\n"
+        f"אתה בונה כאן עסק משלים שיכול להניב הכנסות פסיביות דרך כלכלת המשחק."
+    )
+    
+    keyboard = [
+        [InlineKeyboardButton("💳 אישור תשלום", callback_data="confirm_payment")],
+        [InlineKeyboardButton("❓ שאלות נפוצות", callback_data="payment_faq")],
+        [InlineKeyboardButton("🏠 חזרה", callback_data="back_main")]
+    ]
+    
+    await update.message.reply_text(
+        text,
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+async def confirm_payment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """אישור תשלום"""
+    query = update.callback_query
+    await query.answer()
+    
+    user = query.from_user
+    
+    # יצירת רשומת תשלום
+    if create_payment(user.id, 444.0, "bank_transfer"):
+        context.user_data['pending_payment_confirmation'] = True
+        
+        await query.edit_message_text(
+            f"💳 *אישור תשלום*\n\n"
+            f"1. בצע העברה של 444 ש\"ח\n"
+            f"2. שלח צילום מסך של ההעברה\n"
+            f"3. פרטים נוספים:\n"
+            f"   • שם מלא\n"
+            f"   • מספר טלפון\n"
+            f"   • אימייל (אופציונלי)\n\n"
+            f"נאשר את ההצטרפות בתוך 24 שעות!\n\n"
+            f"📞 לשאלות: @your_contact",
+            parse_mode="Markdown"
+        )
+    else:
+        await query.answer("❌ שגיאה ביצירת בקשת תשלום", show_alert=True)
 
 # =========================
 # Handlers כלכלת משחק
@@ -205,438 +433,6 @@ async def economy_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
-
-async def daily_reward_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """תיגמול יומי"""
-    query = update.callback_query
-    await query.answer()
-    
-    user = query.from_user
-    result = academy_economy.claim_daily_reward(user.id)
-    
-    if result['success']:
-        text = (
-            f"🎉 *תיגמול יומי התקבל!*\n\n"
-            f"💰 coins: +{result['reward']:.2f}\n"
-            f"📈 בסיס: {result['base_reward']:.2f}\n"
-            f"🔥 בונוס סטריק: +{result['streak_bonus']:.2f}\n"
-            f"📅 סטריק נוכחי: {result['new_streak']} ימים\n\n"
-            f"המשך ללמוד ולצבור! 🚀"
-        )
-    else:
-        text = f"❌ {result['message']}"
-    
-    await query.edit_message_text(
-        text,
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton("🏦 חזרה לכלכלה", callback_data="economy")
-        ]])
-    )
-
-async def learning_activity_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """רישום פעילות לימודית"""
-    query = update.callback_query
-    await query.answer()
-    
-    text = (
-        f"📚 *רישום פעילות לימודית*\n\n"
-        f"🎯 בחר סוג פעילות:\n\n"
-        f"• קריאת חומר (30 דקות) 📖\n"
-        f"• צפייה בשיעור (30 דקות) 🎥\n"
-        f"• תרגול מעשי (30 דקות) 💻\n"
-        f"• השתתפות בדיון (20 דקות) 💬\n"
-        f"• הגשת מטלה (45 דקות) 📝\n\n"
-        f"לאחר הבחירה, תתבקש לשלוח תיאור קצר של הפעילות."
-    )
-    
-    keyboard = [
-        [InlineKeyboardButton("📖 קריאת חומר", callback_data="activity_reading")],
-        [InlineKeyboardButton("🎥 צפייה בשיעור", callback_data="activity_watching")],
-        [InlineKeyboardButton("💻 תרגול מעשי", callback_data="activity_practice")],
-        [InlineKeyboardButton("💬 השתתפות בדיון", callback_data="activity_discussion")],
-        [InlineKeyboardButton("📝 הגשת מטלה", callback_data="activity_assignment")],
-        [InlineKeyboardButton("🔙 חזרה", callback_data="economy")]
-    ]
-    
-    await query.edit_message_text(
-        text,
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-
-async def handle_learning_activity(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """מטפל בבחירת פעילות לימודית"""
-    query = update.callback_query
-    await query.answer()
-    
-    user = query.from_user
-    activity_type = query.data
-    
-    # מיפוי פעילויות לזמנים
-    activity_durations = {
-        'activity_reading': 30,
-        'activity_watching': 30,
-        'activity_practice': 30,
-        'activity_discussion': 20,
-        'activity_assignment': 45
-    }
-    
-    activity_names = {
-        'activity_reading': 'קריאת חומר',
-        'activity_watching': 'צפייה בשיעור',
-        'activity_practice': 'תרגול מעשי',
-        'activity_discussion': 'השתתפות בדיון',
-        'activity_assignment': 'הגשת מטלה'
-    }
-    
-    duration = activity_durations.get(activity_type, 30)
-    activity_name = activity_names.get(activity_type, 'פעילות לימודית')
-    
-    # שמירת סוג הפעילות בהקשר
-    context.user_data['pending_learning_activity'] = {
-        'type': activity_type,
-        'name': activity_name,
-        'duration': duration
-    }
-    
-    await query.edit_message_text(
-        f"📝 *רישום {activity_name}*\n\n"
-        f"⏰ משך מוערך: {duration} דקות\n\n"
-        f"✍️ שלח תיאור קצר של מה עשית:\n"
-        f"• איזה חומר קראת?\n"
-        f"• איזה שיעור צפית?\n"
-        f"• מה תרגלת?\n"
-        f"• על מה דנת?\n"
-        f"• איזו מטלה הגשת?\n\n"
-        f"ההודעה הבאה שלך תירשם כפעילות הלימודית.",
-        parse_mode="Markdown"
-    )
-
-async def handle_activity_description(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """מטפל בתיאור הפעילות הלימודית"""
-    user = update.effective_user
-    message = update.message
-    
-    if 'pending_learning_activity' not in context.user_data:
-        return
-    
-    activity_data = context.user_data['pending_learning_activity']
-    description = message.text
-    
-    # רישום הפעילות במערכת הכלכלה
-    result = academy_economy.add_learning_activity(
-        user.id, 
-        activity_data['name'], 
-        activity_data['duration']
-    )
-    
-    if result['success']:
-        await message.reply_text(
-            f"✅ *פעילות לימודית נרשמה!*\n\n"
-            f"📚 {activity_data['name']}\n"
-            f"⏰ {activity_data['duration']} דקות\n"
-            f"📊 נקודות: +{result['points_earned']}\n"
-            f"🪙 coins: +{result['coins_earned']:.2f}\n\n"
-            f"המשך לצבור ידע וערך! 💎",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🏦 חזרה לכלכלה", callback_data="economy")
-            ]])
-        )
-    else:
-        await message.reply_text(
-            "❌ שגיאה ברישום הפעילות. נסה שוב.",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🏦 חזרה לכלכלה", callback_data="economy")
-            ]])
-        )
-    
-    del context.user_data['pending_learning_activity']
-
-# =========================
-# Handlers תשלומים והצטרפות
-# =========================
-
-async def payment_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """פקודת /payment - הרשמה לאקדמיה"""
-    user = update.effective_user
-    
-    text = (
-        f"🎓 *הצטרפות לאקדמיה - השקעה בעצמך!*\n\n"
-        
-        f"💼 *מה מקבלים?*\n"
-        f"• גישה מלאה לבוט האקדמיה 🎯\n"
-        f"• הצטרפות לקבוצה הפרטית: https://t.me/+WaA_aHzbwlU4MjNk 👥\n"
-        f"• נכס דיגיטלי לכל החיים 📚\n"
-        f"• יכולת לצרף משתתפים ולבנות רשת 🕸️\n"
-        f"• מערכת מעקב והתקדמות מתקדמת 📊\n"
-        f"• 100 Academy Coins עם ההצטרפות 💎\n\n"
-        
-        f"💰 *השקעה:* 444 ש\"ח\n\n"
-        
-        f"🏦 *איך משלמים?*\n"
-        f"1. העברה 444 ש\"ח לחשבון הבא:\n"
-        f"   בנק: ______\n"
-        f"   סניף: ______\n"
-        f"   חשבון: ______\n\n"
-        
-        f"2. שלח אישור תשלום עם השם שלך\n"
-        f"3. נאשר בתוך 24 שעות\n\n"
-        
-        f"🚀 *זכור:* האקדמיה היא *הנכס הדיגיטלי שלך*!\n"
-        f"אתה בונה כאן עסק משלים שיכול להניב הכנסות פסיביות דרך כלכלת המשחק."
-    )
-    
-    keyboard = [
-        [InlineKeyboardButton("💳 אישור תשלום", callback_data="confirm_payment")],
-        [InlineKeyboardButton("❓ שאלות נפוצות", callback_data="payment_faq")],
-        [InlineKeyboardButton("🏠 חזרה", callback_data="back_main")]
-    ]
-    
-    await update.message.reply_text(
-        text,
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-
-async def confirm_payment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """אישור תשלום"""
-    query = update.callback_query
-    await query.answer()
-    
-    context.user_data['pending_payment_confirmation'] = True
-    
-    await query.edit_message_text(
-        f"💳 *אישור תשלום*\n\n"
-        f"1. בצע העברה של 444 ש\"ח\n"
-        f"2. שלח צילום מסך של ההעברה\n"
-        f"3. פרטים נוספים:\n"
-        f"   • שם מלא\n"
-        f"   • מספר טלפון\n"
-        f"   • אימייל (אופציונלי)\n\n"
-        f"נאשר את ההצטרפות בתוך 24 שעות!\n\n"
-        f"📞 לשאלות: @your_contact",
-        parse_mode="Markdown"
-    )
-
-# =========================
-# Handlers מערכת משימות
-# =========================
-
-async def tasks_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """פקודת /tasks - מציגה את כל המשימות"""
-    user = update.effective_user
-    if not user or not await ensure_user(update):
-        return
-
-    tasks = get_user_tasks(user.id)
-    progress = get_user_stats(user.id)
-    
-    text = (
-        f"🎯 *לוח משימות - התקדמות אישית*\n\n"
-        f"✅ הושלמו: {progress['completed_tasks']}/{progress['total_tasks']}\n"
-        f"📊 נקודות: {progress['total_points']}\n"
-        f"💰 טוקנים: {progress['total_tokens']}\n"
-        f"🏆 דרגה: {progress['rank']}\n\n"
-        f"*רשימת המשימות:*\n"
-    )
-    
-    keyboard = []
-    for task in tasks:
-        status_icon = "🟢" if task['user_status'] == 'approved' else "🟡" if task['user_status'] == 'submitted' else "🔵" if task['user_status'] == 'started' else "⚪"
-        text += f"{status_icon} *משימה {task['task_number']}:* {task['title']}\n"
-        text += f"   נקודות: {task['reward_points']} | טוקנים: {task['reward_tokens']}\n"
-        
-        if not task['user_status'] or task['user_status'] == 'pending':
-            text += "   ❌ לא התחלת\n"
-            keyboard.append([InlineKeyboardButton(
-                f"🚀 התחל משימה {task['task_number']}", 
-                callback_data=f"start_task:{task['task_number']}"
-            )])
-        elif task['user_status'] == 'started':
-            text += "   📝 בתהליך\n"
-            keyboard.append([InlineKeyboardButton(
-                f"📤 הגש משימה {task['task_number']}", 
-                callback_data=f"submit_task:{task['task_number']}"
-            )])
-        elif task['user_status'] == 'submitted':
-            text += "   ⏳ ממתין לאישור\n"
-        elif task['user_status'] == 'approved':
-            text += f"   ✅ אושר ב{task['approved_at'].strftime('%d/%m')}\n"
-        text += "\n"
-    
-    keyboard.append([InlineKeyboardButton("💰 ארנק", callback_data="wallet")])
-    keyboard.append([InlineKeyboardButton("🏠 חזרה לתפריט ראשי", callback_data="back_main")])
-    
-    await update.message.reply_text(
-        text,
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-
-async def start_task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """מתחיל משימה"""
-    query = update.callback_query
-    await query.answer()
-    
-    user = query.from_user
-    task_number = int(query.data.split(":")[1])
-    
-    if start_task(user.id, task_number):
-        task_info = next((t for t in get_user_tasks(user.id) if t['task_number'] == task_number), None)
-        
-        if task_info:
-            await query.edit_message_text(
-                f"🎉 *התחלת משימה {task_number}!*\n\n"
-                f"*{task_info['title']}*\n\n"
-                f"{task_info['description']}\n\n"
-                f"🎁 *תגמול:* {task_info['reward_points']} נקודות + {task_info['reward_tokens']} טוקנים\n\n"
-                f"כדי להשלים את המשימה, לחץ על 'הגש משימה' כשסיימת.",
-                parse_mode="Markdown",
-                reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton(f"📤 הגש משימה {task_number}", callback_data=f"submit_task:{task_number}"),
-                    InlineKeyboardButton("📋 חזרה לרשימה", callback_data="tasks")
-                ]])
-            )
-    else:
-        await query.answer("❌ שגיאה בהתחלת המשימה", show_alert=True)
-
-async def submit_task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """מבקש מהמשתמש להגיש הוכחה"""
-    query = update.callback_query
-    await query.answer()
-    
-    task_number = int(query.data.split(":")[1])
-    context.user_data['pending_task_submission'] = task_number
-    
-    task_info = next((t for t in get_user_tasks(query.from_user.id) if t['task_number'] == task_number), None)
-    
-    if task_info:
-        await query.edit_message_text(
-            f"📤 *הגשת משימה {task_number}: {task_info['title']}*\n\n"
-            f"שלח הודעה עם ההוכחה שהשלמת את המשימה.\n"
-            f"זה יכול להיות:\n"
-            f"• לינק לפוסט/צ'אט\n• צילום מסך\n• טקסט הסבר\n\n"
-            f"*הוכחה נדרשת:* {task_info['description']}\n\n"
-            f"ההודעה הבאה שלך תירשם כהוכחה למשימה זו.",
-            parse_mode="Markdown"
-        )
-
-async def handle_task_proof(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """מטפל בהוכחת משימה שהמשתמש שולח"""
-    user = update.effective_user
-    message = update.message
-    
-    if 'pending_task_submission' not in context.user_data:
-        return
-    
-    task_number = context.user_data['pending_task_submission']
-    proof_text = message.text or "הוכחה במדיה"
-    
-    # ולידציה של הקלט
-    if not validate_task_submission(proof_text):
-        await message.reply_text(
-            "❌ ההוכחה קצרה מדי או מכילה תווים לא תקינים. נסה שוב עם הוכחה מפורטת יותר."
-        )
-        return
-    
-    if submit_task(user.id, task_number, proof_text):
-        # שולח למנהלים לאישור
-        admin_text = (
-            f"📝 *הגשה חדשה למשימה {task_number}*\n\n"
-            f"👤 משתמש: {user.first_name} (@{user.username})\n"
-            f"🆔 ID: {user.id}\n"
-            f"🎯 משימה: {task_number}\n"
-            f"📎 הוכחה: {proof_text[:500]}{'...' if len(proof_text) > 500 else ''}\n\n"
-            f"לאישור:\n"
-            f"`/approve_task {user.id} {task_number}`"
-        )
-        
-        for admin_id in ADMIN_IDS:
-            try:
-                await context.bot.send_message(
-                    chat_id=admin_id,
-                    text=admin_text,
-                    parse_mode="Markdown"
-                )
-            except Exception as e:
-                logger.error(f"Failed to notify admin {admin_id}: {e}")
-        
-        await message.reply_text(
-            f"✅ *המשימה {task_number} הוגשה!*\n\n"
-            f"ההוכחה נשלחה למנהלים לאישור.\n"
-            f"תקבל הודעה כשהמשימה תאושר ותקבל את הנקודות והטוקנים.",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("📋 חזרה למשימות", callback_data="tasks")
-            ]])
-        )
-        
-        del context.user_data['pending_task_submission']
-    else:
-        await message.reply_text("❌ שגיאה בהגשת המשימה. נסה שוב.")
-
-async def approve_task_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """פקודת מנהל לאישור משימה"""
-    if update.effective_user.id not in ADMIN_IDS:
-        await update.message.reply_text("❌ אין הרשאה")
-        return
-    
-    if len(context.args) != 2:
-        await update.message.reply_text("שימוש: /approve_task <user_id> <task_number>")
-        return
-    
-    try:
-        user_id = int(context.args[0])
-        task_number = int(context.args[1])
-    except ValueError:
-        await update.message.reply_text("מספרים לא תקינים")
-        return
-    
-    if approve_task(user_id, task_number):
-        # שולח טוקנים אוטומטית אם מערכת TokenDistributor פעילה
-        wallet_address = get_user_wallet(user_id)
-        if wallet_address and token_distributor.is_connected():
-            task_info = next((t for t in get_user_tasks(user_id) if t['task_number'] == task_number), None)
-            if task_info:
-                token_amount = task_info['reward_tokens']
-                tx_hash = token_distributor.send_tokens(wallet_address, token_amount)
-                
-                if tx_hash:
-                    await update.message.reply_text(
-                        f"✅ משימה {task_number} אושרה למשתמש {user_id}!\n"
-                        f"🎁 נשלחו {task_info['reward_points']} נקודות ו-{token_amount} טוקנים\n"
-                        f"📜 TX: `{tx_hash}`",
-                        parse_mode="Markdown"
-                    )
-                else:
-                    await update.message.reply_text(
-                        f"✅ משימה {task_number} אושרה למשתמש {user_id}!\n"
-                        f"🎁 נוספו {task_info['reward_points']} נקודות\n"
-                        f"⚠️ לא נשלחו טוקנים - בעיה בחיבור ל-blockchain"
-                    )
-        else:
-            await update.message.reply_text(
-                f"✅ משימה {task_number} אושרה למשתמש {user_id}!\n"
-                f"🎁 נקודות נוספו אך טוקנים לא נשלחו (ארנק לא מוגדר או blockchain לא פעיל)"
-            )
-        
-        # הודעה למשתמש
-        try:
-            task_info = next((t for t in get_user_tasks(user_id) if t['task_number'] == task_number), None)
-            if task_info:
-                await context.bot.send_message(
-                    chat_id=user_id,
-                    text=f"🎉 *משימה {task_number} אושרה!*\n\n"
-                         f"קיבלת {task_info['reward_points']} נקודות ו-{task_info['reward_tokens']} טוקנים!\n"
-                         f"📈 המשך לצבור עוד טוקנים!",
-                    parse_mode="Markdown"
-                )
-        except Exception as e:
-            logger.error(f"Failed to notify user: {e}")
-    else:
-        await update.message.reply_text("❌ שגיאה באישור המשימה. ייתכן שהמשימה לא הוגשה או כבר אושרה.")
 
 # =========================
 # Handlers ארנק וסטטיסטיקות
@@ -763,6 +559,61 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     )
 
 # =========================
+# Handlers משימות
+# =========================
+
+async def tasks_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """פקודת /tasks - מציגה את כל המשימות"""
+    user = update.effective_user
+    if not user or not await ensure_user(update):
+        return
+
+    tasks = get_user_tasks(user.id)
+    progress = get_user_stats(user.id)
+    
+    text = (
+        f"🎯 *לוח משימות - התקדמות אישית*\n\n"
+        f"✅ הושלמו: {progress['completed_tasks']}/{progress['total_tasks']}\n"
+        f"📊 נקודות: {progress['total_points']}\n"
+        f"💰 טוקנים: {progress['total_tokens']}\n"
+        f"🏆 דרגה: {progress['rank']}\n\n"
+        f"*רשימת המשימות:*\n"
+    )
+    
+    keyboard = []
+    for task in tasks:
+        status_icon = "🟢" if task['user_status'] == 'approved' else "🟡" if task['user_status'] == 'submitted' else "🔵" if task['user_status'] == 'started' else "⚪"
+        text += f"{status_icon} *משימה {task['task_number']}:* {task['title']}\n"
+        text += f"   נקודות: {task['reward_points']} | טוקנים: {task['reward_tokens']}\n"
+        
+        if not task['user_status'] or task['user_status'] == 'pending':
+            text += "   ❌ לא התחלת\n"
+            keyboard.append([InlineKeyboardButton(
+                f"🚀 התחל משימה {task['task_number']}", 
+                callback_data=f"start_task:{task['task_number']}"
+            )])
+        elif task['user_status'] == 'started':
+            text += "   📝 בתהליך\n"
+            keyboard.append([InlineKeyboardButton(
+                f"📤 הגש משימה {task['task_number']}", 
+                callback_data=f"submit_task:{task['task_number']}"
+            )])
+        elif task['user_status'] == 'submitted':
+            text += "   ⏳ ממתין לאישור\n"
+        elif task['user_status'] == 'approved':
+            text += f"   ✅ אושר ב{task['approved_at'].strftime('%d/%m')}\n"
+        text += "\n"
+    
+    keyboard.append([InlineKeyboardButton("💰 ארנק", callback_data="wallet")])
+    keyboard.append([InlineKeyboardButton("🏠 חזרה לתפריט ראשי", callback_data="back_main")])
+    
+    await update.message.reply_text(
+        text,
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+# =========================
 # Callback Handlers
 # =========================
 
@@ -803,6 +654,18 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await handle_learning_activity(update, context)
     elif data == "confirm_payment":
         await confirm_payment_callback(update, context)
+    elif data == "admin_pending":
+        await pending_tasks_command(update, context)
+    elif data == "admin_top_ref":
+        await admin_top_referrers_callback(update, context)
+    elif data == "admin_group_info":
+        await group_info_command(update, context)
+    else:
+        await query.answer("❌ פעולה לא זמינה", show_alert=True)
+
+# =========================
+# פונקציות Callback נוספות
+# =========================
 
 async def tasks_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """כפתור משימות"""
@@ -1031,6 +894,36 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
+async def admin_top_referrers_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """כפתור טופ מזמינים"""
+    query = update.callback_query
+    user = query.from_user
+    
+    if user.id not in ADMIN_IDS:
+        await query.answer("❌ אין הרשאה", show_alert=True)
+        return
+    
+    top_referrers = get_top_referrers(10)
+    
+    text = "🏆 *טופ 10 מזמינים:*\n\n"
+    
+    for i, referrer in enumerate(top_referrers, 1):
+        text += f"{i}. {referrer['first_name']} (@{referrer['username'] or 'ללא'})\n"
+        text += f"   🎯 {referrer['referral_count']} הפניות\n\n"
+    
+    if not top_referrers:
+        text += "אין עדיין הפניות במערכת"
+    
+    keyboard = [
+        [InlineKeyboardButton("👑 חזרה לניהול", callback_data="admin")]
+    ]
+    
+    await query.edit_message_text(
+        text,
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
 async def start_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """כפתור חזרה לתפריט ראשי"""
     query = update.callback_query
@@ -1076,6 +969,7 @@ def register_handlers():
     ptb_app.add_handler(CommandHandler("admin", admin_command))
     ptb_app.add_handler(CommandHandler("pending_tasks", pending_tasks_command))
     ptb_app.add_handler(CommandHandler("approve_task", approve_task_command))
+    ptb_app.add_handler(CommandHandler("group_info", group_info_command))
     
     # handlers למערכת משימות
     ptb_app.add_handler(CallbackQueryHandler(start_task_callback, pattern="^start_task:"))
@@ -1112,7 +1006,9 @@ async def startup_event():
         logger.info(f"👑 Admin IDs: {ADMIN_IDS}")
         
         # אתחול סכמת DB
+        logger.info("🔄 Initializing database schema...")
         init_schema()
+        logger.info("✅ Database schema initialized successfully!")
         
     except Exception as e:
         logger.error(f"❌ Failed to start bot: {e}")
