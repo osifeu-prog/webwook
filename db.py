@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional
 from decimal import Decimal
 from urllib.parse import urlparse
+import re
 
 # הגדרות לוג
 logger = logging.getLogger(__name__)
@@ -18,39 +19,17 @@ def get_db_connection():
     if not database_url:
         raise ValueError("DATABASE_URL environment variable is not set")
     
+    # תיקון ה-URL - מחליף את המילה "port" במספר פורט אמיתי
+    if "port" in database_url:
+        database_url = database_url.replace("port", "5432")
+        logger.info(f"Fixed database URL: {database_url}")
+    
     try:
-        # ניסיון חיבור ישיר ראשון
         return psycopg2.connect(database_url, sslmode='require')
     except Exception as e:
-        logger.warning(f"Direct connection failed: {e}, trying parsed connection...")
-        
-        try:
-            # אם החיבור הישיר נכשל, נפרק את ה-URL
-            parsed = urlparse(database_url)
-            
-            # חילוץ הרכיבים
-            dbname = parsed.path[1:]  # מסירים את ה-/ הראשון
-            user = parsed.username
-            password = parsed.password
-            host = parsed.hostname
-            port = parsed.port or 5432  # ברירת מחדל ל-PostgreSQL
-            
-            logger.info(f"Connecting to database: {host}:{port}/{dbname} as user {user}")
-            
-            # חיבור עם פרמטרים מפורשים
-            conn = psycopg2.connect(
-                dbname=dbname,
-                user=user,
-                password=password,
-                host=host,
-                port=port,
-                sslmode='require'
-            )
-            return conn
-        except Exception as parse_error:
-            logger.error(f"Parsed connection also failed: {parse_error}")
-            logger.error(f"Database URL format: {database_url}")
-            raise ConnectionError(f"Failed to connect to database: {parse_error}")
+        logger.error(f"Failed to connect to database: {e}")
+        logger.error(f"Database URL: {database_url}")
+        raise ConnectionError(f"Failed to connect to database: {e}")
 
 # =========================
 # אתחול סכמה
@@ -205,6 +184,21 @@ def init_schema():
                 streak_count INTEGER NOT NULL,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 UNIQUE(user_id, reward_date)
+            );
+        """)
+        
+        # טבלת תשלומים
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS payments (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT NOT NULL,
+                amount DECIMAL(10,2) NOT NULL,
+                status VARCHAR(20) DEFAULT 'pending',
+                payment_method VARCHAR(50),
+                transaction_id VARCHAR(100),
+                group_access_granted BOOLEAN DEFAULT FALSE,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             );
         """)
         
@@ -992,6 +986,86 @@ def add_teaching_reward(teacher_id: int, student_id: int, reward_type: str) -> b
     except Exception as e:
         conn.rollback()
         logger.error(f"Error adding teaching reward for teacher {teacher_id}: {e}")
+        return False
+    finally:
+        cur.close()
+        conn.close()
+
+# =========================
+# פונקציות תשלומים
+# =========================
+
+def create_payment(user_id: int, amount: float, payment_method: str = "bank_transfer") -> bool:
+    """יוצר רשומת תשלום חדשה"""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    
+    try:
+        cur.execute("""
+            INSERT INTO payments (user_id, amount, payment_method, created_at, updated_at)
+            VALUES (%s, %s, %s, NOW(), NOW())
+            RETURNING id
+        """, (user_id, amount, payment_method))
+        
+        conn.commit()
+        return True
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"Error creating payment for user {user_id}: {e}")
+        return False
+    finally:
+        cur.close()
+        conn.close()
+
+def approve_payment(user_id: int) -> bool:
+    """מאשר תשלום ומעניק גישה לקבוצה"""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    
+    try:
+        cur.execute("""
+            UPDATE payments 
+            SET status = 'approved', 
+                group_access_granted = TRUE,
+                updated_at = NOW()
+            WHERE user_id = %s AND status = 'pending'
+        """, (user_id,))
+        
+        # מוסיף Academy Coins בונוס
+        cur.execute("""
+            UPDATE user_economy 
+            SET academy_coins = academy_coins + 100,
+                total_earnings = total_earnings + 100,
+                updated_at = NOW()
+            WHERE user_id = %s
+        """, (user_id,))
+        
+        conn.commit()
+        return cur.rowcount > 0
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"Error approving payment for user {user_id}: {e}")
+        return False
+    finally:
+        cur.close()
+        conn.close()
+
+def has_paid_access(user_id: int) -> bool:
+    """בודק אם למשתמש יש גישת תשלום מאושרת"""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    
+    try:
+        cur.execute("""
+            SELECT COUNT(*) 
+            FROM payments 
+            WHERE user_id = %s AND status = 'approved' AND group_access_granted = TRUE
+        """, (user_id,))
+        
+        result = cur.fetchone()
+        return result[0] > 0 if result else False
+    except Exception as e:
+        logger.error(f"Error checking paid access for user {user_id}: {e}")
         return False
     finally:
         cur.close()
