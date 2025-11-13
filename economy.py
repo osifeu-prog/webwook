@@ -1,4 +1,5 @@
 # economy.py - כלכלת המשחק המתקדמת (מתוקן)
+import os
 import logging
 from decimal import Decimal
 from datetime import datetime, timedelta
