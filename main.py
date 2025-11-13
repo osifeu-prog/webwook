@@ -12,7 +12,9 @@ from db import (
     store_user, get_user_wallet, update_user_wallet,
     get_user_tasks, start_task, submit_task, approve_task, 
     get_user_stats, add_referral, get_top_referrers, get_pending_approvals,
-    get_user_progress, init_schema, create_payment, approve_payment, has_paid_access
+    get_user_progress, init_schema, create_payment, approve_payment, has_paid_access,
+    init_user_economy, get_user_economy_stats, add_learning_activity, claim_daily_reward,
+    add_teaching_reward, get_network_stats
 )
 from token_distributor import token_distributor
 from config import BotConfig, TaskConfig
@@ -53,7 +55,7 @@ async def ensure_user(update: Update) -> bool:
     
     # מאתחל כלכלה למשתמש חדש
     if success:
-        academy_economy.init_user_economy(user.id)
+        init_user_economy(user.id)
     
     return success
 
@@ -76,7 +78,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             if referred_by != user.id:  # מונע הפניה עצמית
                 if add_referral(referred_by, user.id):
                     # תגמול כלכלי עבור ההפניה
-                    academy_economy.add_teaching_reward(referred_by, user.id, 'referral')
+                    add_teaching_reward(referred_by, user.id, 'referral')
                     await update.message.reply_text(
                         "🎉 הצטרפת דרך הזמנה של חבר! קיבלת 5 נקודות בונוס!"
                     )
@@ -92,34 +94,34 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     )
     
     # אתחול כלכלה
-    academy_economy.init_user_economy(user.id)
+    init_user_economy(user.id)
 
     text = (
-        f"🎓 *ברוך הבא לאקדמיה הדיגיטלית!* 🚀\n\n"
+        f"🎓 ברוך הבא לאקדמיה הדיגיטלית! 🚀\n\n"
         
         f"👋 שלום {user.first_name}!\n\n"
         
-        f"💎 *זו לא עוד פלטפורמה - זו הנכס הדיגיטלי שלך!*\n\n"
+        f"💎 זו לא עוד פלטפורמה - זו הנכס הדיגיטלי שלך!\n\n"
         
-        f"🎯 *מה תקבל כאן:*\n"
+        f"🎯 מה תקבל כאן:\n"
         f"• ידע מעשי שניתן למנף מיידית 💼\n"
         f"• יכולת לבנות רשת לימודית משלך 🕸️\n"
         f"• כלכלת משחק שמרוויחה עבורך 🎮\n"
         f"• Academy Coins - המטבע שלך 🪙\n\n"
         
-        f"📈 *איך מרוויחים?*\n"
+        f"📈 איך מרוויחים:\n"
         f"1. לומדים וצוברים נקודות 📚\n"
         f"2. מלמדים ומרחיבים את הרשת 👥\n"
         f"3. מתקדמים בדרגות Leadership 🏆\n"
         f"4. ממירים ל-tokens אמיתיים 💰\n\n"
         
-        f"🚀 *גישה מלאה לאקדמיה:*\n"
+        f"🚀 גישה מלאה לאקדמיה:\n"
         f"• עלות: 444 ש\"ח\n"
-        f"• קבוצת לימוד פרטית: https://t.me/+WaA_aHzbwlU4MjNk\n"
+        f"• קבוצת לימוד פרטית\n"
         f"• תמיכה אישית\n"
         f"• 100 Academy Coins מתנה!\n\n"
         
-        f"💼 *זכור:* האקדמיה היא *הנכס הדיגיטלי שלך*!\n"
+        f"💼 זכור: האקדמיה היא הנכס הדיגיטלי שלך!\n"
         f"אתה בונה כאן עסק משלים שיכול להניב הכנסות פסיביות דרך כלכלת המשחק."
     )
 
@@ -138,24 +140,22 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     
     await update.message.reply_text(
         text,
-        parse_mode="Markdown",
         reply_markup=reply_markup
     )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """פקודת /help מעודכנת"""
     await update.message.reply_text(
-        "📖 *מדריך שימוש - אקדמיה דיגיטלית*\n\n"
-        "🎯 */tasks* - הצג את כל המשימות הזמינות\n"
-        "💰 */wallet* - צפה בארנק ובטוקנים שלך\n"
-        "🏦 */economy* - כלכלת המשחק ו-Academy Coins\n"
-        "📊 */stats* - סטטיסטיקות אישיות\n"
-        "👥 */referrals* - הזמן חברים וקבל בונוסים\n"
-        "🔗 */set_wallet <address>* - הגדר ארנק BSC\n"
-        "💳 */payment* - הרשמה לאקדמיה המלאה\n"
-        "🆘 */help* - הצג הודעה זו\n\n"
-        "לשאלות נוספות פנה למנהלים.",
-        parse_mode="Markdown"
+        "📖 מדריך שימוש - אקדמיה דיגיטלית\n\n"
+        "🎯 /tasks - הצג את כל המשימות הזמינות\n"
+        "💰 /wallet - צפה בארנק ובטוקנים שלך\n"
+        "🏦 /economy - כלכלת המשחק ו-Academy Coins\n"
+        "📊 /stats - סטטיסטיקות אישיות\n"
+        "👥 /referrals - הזמן חברים וקבל בונוסים\n"
+        "🔗 /set_wallet <address> - הגדר ארנק BSC\n"
+        "💳 /payment - הרשמה לאקדמיה המלאה\n"
+        "🆘 /help - הצג הודעה זו\n\n"
+        "לשאלות נוספות פנה למנהלים."
     )
 
 # =========================
@@ -172,18 +172,18 @@ async def referrals_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     bot_username = (await context.bot.get_me()).username
     
     text = (
-        f"👥 *הזמן חברים - קבל בונוסים!*\n\n"
-        f"📧 *קישור הזמנה אישי:*\n"
-        f"`https://t.me/{bot_username}?start=ref_{user.id}`\n\n"
-        f"🎁 *מה תקבל:*\n"
+        f"👥 הזמן חברים - קבל בונוסים!\n\n"
+        f"📧 קישור הזמנה אישי:\n"
+        f"https://t.me/{bot_username}?start=ref_{user.id}\n\n"
+        f"🎁 מה תקבל:\n"
         f"• 5 נקודות לכל חבר שהצטרף\n"
         f"• 5 טוקנים לכל חבר שהצטרף\n"
         f"• 2 Academy Coins לכל חבר שהצטרף\n\n"
-        f"📈 *סטטיסטיקות ההפניות שלך:*\n"
+        f"📈 סטטיסטיקות ההפניות שלך:\n"
         f"• {stats['referral_count']} חברים הוזמנו\n"
         f"• {stats['referral_count'] * 5} נקודות בונוס\n"
         f"• {stats['referral_count'] * 5} טוקנים בונוס\n\n"
-        f"💎 *הזמן עוד חברים ותרוויח יותר!*"
+        f"💎 הזמן עוד חברים ותרוויח יותר!"
     )
     
     keyboard = [
@@ -192,7 +192,6 @@ async def referrals_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     
     await update.message.reply_text(
         text,
-        parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
@@ -211,18 +210,18 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     top_referrers = get_top_referrers(5)
     
     text = (
-        f"👑 *פאנל ניהול - אקדמיה דיגיטלית*\n\n"
-        f"📊 *סטטיסטיקות מערכת:*\n"
+        f"👑 פאנל ניהול - אקדמיה דיגיטלית\n\n"
+        f"📊 סטטיסטיקות מערכת:\n"
         f"• ⏳ {len(pending_approvals)} משימות ממתינות לאישור\n"
         f"• 👤 {len(top_referrers)} מובילים בהפניות\n\n"
         
-        f"📋 *פקודות מנהל זמינות:*\n"
+        f"📋 פקודות מנהל זמינות:\n"
         f"• /pending_tasks - הצג משימות ממתינות\n"
         f"• /approve_task <user_id> <task_number> - אשר משימה\n"
         f"• /group_info - מידע על הקבוצה\n"
         f"• /broadcast <message> - שליחת הודעה לכל המשתמשים\n\n"
         
-        f"🔧 *ניהול מערכת:*\n"
+        f"🔧 ניהול מערכת:\n"
         f"• /stats - סטטיסטיקות מערכת\n"
         f"• /backup - גיבוי נתונים\n"
     )
@@ -236,7 +235,6 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     
     await update.message.reply_text(
         text,
-        parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
@@ -253,22 +251,44 @@ async def pending_tasks_command(update: Update, context: ContextTypes.DEFAULT_TY
         await update.message.reply_text("✅ אין משימות ממתינות לאישור")
         return
     
-    text = "⏳ *משימות ממתינות לאישור:*\n\n"
+    text = "⏳ משימות ממתינות לאישור:\n\n"
     
     for i, task in enumerate(pending_tasks[:10], 1):  # מוגבל ל-10 משימות
         text += (
-            f"*{i}. משימה {task['task_number']} - {task['title']}*\n"
+            f"{i}. משימה {task['task_number']} - {task['title']}\n"
             f"👤 {task['first_name']} (@{task['username'] or 'ללא'})\n"
             f"🆔 {task['user_id']}\n"
             f"📝 {task['submitted_proof'][:100]}{'...' if len(task['submitted_proof']) > 100 else ''}\n"
             f"⏰ {task['submitted_at'].strftime('%d/%m/%Y %H:%M')}\n"
-            f"`/approve_task {task['user_id']} {task['task_number']}`\n\n"
+            f"/approve_task {task['user_id']} {task['task_number']}\n\n"
         )
     
     if len(pending_tasks) > 10:
-        text += f"*... ועוד {len(pending_tasks) - 10} משימות*"
+        text += f"... ועוד {len(pending_tasks) - 10} משימות"
     
-    await update.message.reply_text(text, parse_mode="Markdown")
+    await update.message.reply_text(text)
+
+async def approve_task_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """פקודת /approve_task - אישור משימה"""
+    user = update.effective_user
+    if user.id not in ADMIN_IDS:
+        await update.message.reply_text("❌ אין הרשאה")
+        return
+    
+    if len(context.args) != 2:
+        await update.message.reply_text("שימוש: /approve_task <user_id> <task_number>")
+        return
+    
+    try:
+        user_id = int(context.args[0])
+        task_number = int(context.args[1])
+        
+        if approve_task(user_id, task_number):
+            await update.message.reply_text(f"✅ משימה {task_number} אושרה למשתמש {user_id}")
+        else:
+            await update.message.reply_text("❌ לא ניתן לאשר את המשימה")
+    except ValueError:
+        await update.message.reply_text("❌ פרמטרים לא תקינים")
 
 async def group_info_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """פקודת /group_info - מידע על הקבוצה"""
@@ -280,14 +300,14 @@ async def group_info_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     group_link = "https://t.me/+WaA_aHzbwlU4MjNk"
     
     text = (
-        f"👥 *מידע קבוצת האקדמיה*\n\n"
-        f"🔗 *קישור קבוצה:*\n"
+        f"👥 מידע קבוצת האקדמיה\n\n"
+        f"🔗 קישור קבוצה:\n"
         f"{group_link}\n\n"
-        f"📊 *סטטיסטיקות:*\n"
+        f"📊 סטטיסטיקות:\n"
         f"• קישור קבוצה: פעיל ✅\n"
         f"• קבוצה פרטית: כן ✅\n"
         f"• גישה: למשתתפים בלבד 🔒\n\n"
-        f"💡 *הנחיות:*\n"
+        f"💡 הנחיות:\n"
         f"1. הקבוצה מיועדת למשתתפים ששילמו 444 ש\"ח\n"
         f"2. יש לאשר משתתפים ידנית\n"
         f"3. שמור על הקבוצה פעילה ואיכותית\n"
@@ -300,7 +320,6 @@ async def group_info_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     
     await update.message.reply_text(
         text,
-        parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
@@ -315,17 +334,16 @@ async def payment_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     # בדיקה אם כבר יש גישה
     if has_paid_access(user.id):
         await update.message.reply_text(
-            "✅ *כבר יש לך גישה מלאה לאקדמיה!*\n\n"
+            "✅ כבר יש לך גישה מלאה לאקדמיה!\n\n"
             "🔗 קבוצת האקדמיה: https://t.me/+WaA_aHzbwlU4MjNk\n\n"
-            "💎 המשך ללמוד ולהרוויח!",
-            parse_mode="Markdown"
+            "💎 המשך ללמוד ולהרוויח!"
         )
         return
     
     text = (
-        f"🎓 *הצטרפות לאקדמיה - השקעה בעצמך!*\n\n"
+        f"🎓 הצטרפות לאקדמיה - השקעה בעצמך!\n\n"
         
-        f"💼 *מה מקבלים?*\n"
+        f"💼 מה מקבלים?\n"
         f"• גישה מלאה לבוט האקדמיה 🎯\n"
         f"• הצטרפות לקבוצה הפרטית: https://t.me/+WaA_aHzbwlU4MjNk 👥\n"
         f"• נכס דיגיטלי לכל החיים 📚\n"
@@ -333,9 +351,9 @@ async def payment_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         f"• מערכת מעקב והתקדמות מתקדמת 📊\n"
         f"• 100 Academy Coins עם ההצטרפות 💎\n\n"
         
-        f"💰 *השקעה:* 444 ש\"ח\n\n"
+        f"💰 השקעה: 444 ש\"ח\n\n"
         
-        f"🏦 *איך משלמים?*\n"
+        f"🏦 איך משלמים?\n"
         f"1. העברה 444 ש\"ח לחשבון הבא:\n"
         f"   בנק: ______\n"
         f"   סניף: ______\n"
@@ -344,7 +362,7 @@ async def payment_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         f"2. שלח אישור תשלום עם השם שלך\n"
         f"3. נאשר בתוך 24 שעות\n\n"
         
-        f"🚀 *זכור:* האקדמיה היא *הנכס הדיגיטלי שלך*!\n"
+        f"🚀 זכור: האקדמיה היא הנכס הדיגיטלי שלך!\n"
         f"אתה בונה כאן עסק משלים שיכול להניב הכנסות פסיביות דרך כלכלת המשחק."
     )
     
@@ -356,7 +374,6 @@ async def payment_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     
     await update.message.reply_text(
         text,
-        parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
@@ -372,7 +389,7 @@ async def confirm_payment_callback(update: Update, context: ContextTypes.DEFAULT
         context.user_data['pending_payment_confirmation'] = True
         
         await query.edit_message_text(
-            f"💳 *אישור תשלום*\n\n"
+            f"💳 אישור תשלום\n\n"
             f"1. בצע העברה של 444 ש\"ח\n"
             f"2. שלח צילום מסך של ההעברה\n"
             f"3. פרטים נוספים:\n"
@@ -380,8 +397,7 @@ async def confirm_payment_callback(update: Update, context: ContextTypes.DEFAULT
             f"   • מספר טלפון\n"
             f"   • אימייל (אופציונלי)\n\n"
             f"נאשר את ההצטרפות בתוך 24 שעות!\n\n"
-            f"📞 לשאלות: @your_contact",
-            parse_mode="Markdown"
+            f"📞 לשאלות: @your_contact"
         )
     else:
         await query.answer("❌ שגיאה ביצירת בקשת תשלום", show_alert=True)
@@ -396,24 +412,24 @@ async def economy_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if not user or not await ensure_user(update):
         return
 
-    stats = academy_economy.get_user_economy_stats(user.id)
-    network_stats = academy_economy.get_network_stats(user.id)
+    stats = get_user_economy_stats(user.id)
+    network_stats = get_network_stats(user.id)
     
     text = (
-        f"🏦 *כלכלת האקדמיה - {user.first_name}*\n\n"
-        f"💰 *מאזן:*\n"
+        f"🏦 כלכלת האקדמיה - {user.first_name}\n\n"
+        f"💰 מאזן:\n"
         f"🪙 Academy Coins: {stats.get('academy_coins', 0):.2f}\n"
         f"📚 נקודות למידה: {stats.get('learning_points', 0)}\n"
         f"👨‍🏫 נקודות הוראה: {stats.get('teaching_points', 0)}\n"
         f"💎 סך הרווחים: {stats.get('total_earnings', 0):.2f} coins\n\n"
         
-        f"🎯 *דרגת Leadership:*\n"
+        f"🎯 דרגת Leadership:\n"
         f"🏆 {stats.get('level_name', 'מתחיל')} (רמה {stats.get('leadership_level', 1)})\n"
         f"📈 מכפיל: x{stats.get('level_multiplier', 1.0)}\n"
         f"👥 תלמידים: {stats.get('student_count', 0)}\n"
         f"🎓 נדרשים לדרגה הבאה: {stats.get('next_level_students_needed', 0)} תלמידים\n\n"
         
-        f"📊 *סטטיסטיקות רשת:*\n"
+        f"📊 סטטיסטיקות רשת:\n"
         f"🔗 Level 1: {network_stats.get('level_1_students', 0)} תלמידים\n"
         f"🔗 Level 2: {network_stats.get('level_2_students', 0)} תלמידים\n"
         f"🔗 Level 3: {network_stats.get('level_3_students', 0)} תלמידים\n"
@@ -430,9 +446,107 @@ async def economy_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     
     await update.message.reply_text(
         text,
-        parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
+
+async def daily_reward_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """תיגמול יומי"""
+    query = update.callback_query
+    await query.answer()
+    
+    user = query.from_user
+    result = claim_daily_reward(user.id)
+    
+    if result['success']:
+        await query.edit_message_text(
+            f"🎁 תיגמול יומי\n\n"
+            f"💰 קיבלת {result['reward']:.2f} Academy Coins!\n"
+            f"📊 בסיס: {result['base_reward']:.2f}\n"
+            f"🔥 בונוס סטריק: {result['streak_bonus']:.2f}\n"
+            f"📈 סטריק נוכחי: {result['new_streak']} ימים\n\n"
+            f"💎 חזור מחר לעוד תיגמול!"
+        )
+    else:
+        await query.answer(result['message'], show_alert=True)
+
+async def learning_activity_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """פעילות לימודית"""
+    query = update.callback_query
+    await query.answer()
+    
+    text = (
+        "📖 פעילות לימודית\n\n"
+        "בחר סוג פעילות:\n\n"
+        "🎯 כל פעילות מזכה בנקודות ו-Academy Coins\n"
+        "💡 ככל שהפעילות ארוכה יותר, כך הרווח גדול יותר"
+    )
+    
+    keyboard = [
+        [InlineKeyboardButton("📚 קריאת מאמר (10 דק')", callback_data="activity_reading_10")],
+        [InlineKeyboardButton("🎥 צפייה בסרטון (15 דק')", callback_data="activity_video_15")],
+        [InlineKeyboardButton("💻 תרגול מעשי (20 דק')", callback_data="activity_practice_20")],
+        [InlineKeyboardButton("📝 כתיבת תוכן (25 דק')", callback_data="activity_writing_25")],
+        [InlineKeyboardButton("🔙 חזרה", callback_data="economy")]
+    ]
+    
+    await query.edit_message_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+async def handle_learning_activity(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """מטפל בבחירת פעילות לימודית"""
+    query = update.callback_query
+    await query.answer()
+    
+    data = query.data
+    user = query.from_user
+    
+    # מיפוי פעילויות
+    activities = {
+        'activity_reading_10': {'type': 'קריאת מאמר', 'duration': 10},
+        'activity_video_15': {'type': 'צפייה בסרטון', 'duration': 15},
+        'activity_practice_20': {'type': 'תרגול מעשי', 'duration': 20},
+        'activity_writing_25': {'type': 'כתיבת תוכן', 'duration': 25}
+    }
+    
+    activity = activities.get(data)
+    if activity:
+        context.user_data['pending_activity'] = activity
+        await query.edit_message_text(
+            f"📖 {activity['type']} - {activity['duration']} דקות\n\n"
+            f"📝 שלח תיאור קצר של מה למדת:\n"
+            f"(2-3 משפטים מספיקים)"
+        )
+
+async def handle_activity_description(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """מטפל בתיאור הפעילות"""
+    user = update.effective_user
+    description = update.message.text
+    
+    if 'pending_activity' not in context.user_data:
+        return
+    
+    activity = context.user_data['pending_activity']
+    
+    result = add_learning_activity(
+        user.id, 
+        activity['type'], 
+        activity['duration'], 
+        description
+    )
+    
+    if result['success']:
+        await update.message.reply_text(
+            f"🎉 פעילות נרשמה בהצלחה!\n\n"
+            f"📊 נקודות: +{result['points_earned']}\n"
+            f"🪙 Academy Coins: +{result['coins_earned']:.2f}\n"
+            f"📚 סוג: {result['activity_type']}\n\n"
+            f"💎 המשך ללמוד ולהרוויח!"
+        )
+        del context.user_data['pending_activity']
+    else:
+        await update.message.reply_text("❌ שגיאה ברישום הפעילות")
 
 # =========================
 # Handlers ארנק וסטטיסטיקות
@@ -448,18 +562,18 @@ async def wallet_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     wallet_address = get_user_wallet(user.id)
     
     text = (
-        f"💰 *ארנק אישי*\n\n"
+        f"💰 ארנק אישי\n\n"
         f"👤 בעלים: {user.first_name}\n"
         f"🆔 ID: {user.id}\n"
     )
     
     if wallet_address:
-        text += f"📍 ארנק: `{wallet_address}`\n\n"
+        text += f"📍 ארנק: {wallet_address}\n\n"
     else:
-        text += f"📍 ארנק: *לא הוגדר* ❌\n\n"
+        text += f"📍 ארנק: לא הוגדר ❌\n\n"
     
     text += (
-        f"*מאזן:*\n"
+        f"מאזן:\n"
         f"🪙 טוקנים: {stats['total_tokens']}\n"
         f"📊 נקודות: {stats['total_points']}\n"
         f"🎯 משימות שהושלמו: {stats['completed_tasks']}/{stats['total_tasks']}\n"
@@ -467,7 +581,7 @@ async def wallet_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     )
     
     if not wallet_address:
-        text += "ℹ️ כדי לקבל טוקנים, הגדר את כתובת ה-BSC Wallet שלך עם הפקודה:\n`/set_wallet <your_bsc_address>`"
+        text += "ℹ️ כדי לקבל טוקנים, הגדר את כתובת ה-BSC Wallet שלך עם הפקודה:\n/set_wallet <your_bsc_address>"
     
     keyboard = []
     if not wallet_address:
@@ -481,7 +595,6 @@ async def wallet_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     
     await update.message.reply_text(
         text,
-        parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
@@ -493,9 +606,8 @@ async def set_wallet_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     
     if not context.args:
         await update.message.reply_text(
-            "שימוש: `/set_wallet <your_bsc_address>`\n\n"
-            "דוגמה: `/set_wallet 0x742E4C4F4B6B577B8B9B0C1D2E3F4A5B6C7D8E9F`",
-            parse_mode="Markdown"
+            "שימוש: /set_wallet <your_bsc_address>\n\n"
+            "דוגמה: /set_wallet 0x742E4C4F4B6B577B8B9B0C1D2E3F4A5B6C7D8E9F"
         )
         return
     
@@ -510,10 +622,9 @@ async def set_wallet_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     
     if update_user_wallet(user.id, wallet_address):
         await update.message.reply_text(
-            f"✅ *ארנק עודכן בהצלחה!*\n\n"
-            f"📍 `{wallet_address}`\n\n"
-            f"כעת תוכל לקבל טוקנים למשימות שלך!",
-            parse_mode="Markdown"
+            f"✅ ארנק עודכן בהצלחה!\n\n"
+            f"📍 {wallet_address}\n\n"
+            f"כעת תוכל לקבל טוקנים למשימות שלך!"
         )
     else:
         await update.message.reply_text("❌ שגיאה בעדכון הארנק. נסה שוב.")
@@ -525,13 +636,13 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
 
     stats = get_user_stats(user.id)
-    economy_stats = academy_economy.get_user_economy_stats(user.id)
+    economy_stats = get_user_economy_stats(user.id)
     
     text = (
-        f"📊 *סטטיסטיקות אישיות*\n\n"
+        f"📊 סטטיסטיקות אישיות\n\n"
         f"👤 {user.first_name}\n"
         f"🏆 דרגה: {stats['rank']}\n\n"
-        f"*הישגים:*\n"
+        f"הישגים:\n"
         f"🎯 משימות: {stats['completed_tasks']}/{stats['total_tasks']} ({stats['completed_tasks']/stats['total_tasks']*100:.1f}%)\n"
         f"📊 נקודות: {stats['total_points']}\n"
         f"🪙 טוקנים: {stats['total_tokens']}\n"
@@ -540,7 +651,7 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     
     # סטטיסטיקות כלכלה
     if economy_stats:
-        text += f"*כלכלת משחק:*\n"
+        text += f"כלכלת משחק:\n"
         text += f"🏦 Academy Coins: {economy_stats.get('academy_coins', 0):.2f}\n"
         text += f"📚 למידה: {economy_stats.get('learning_points', 0)} נקודות\n"
         text += f"👨‍🏫 הוראה: {economy_stats.get('teaching_points', 0)} נקודות\n"
@@ -554,7 +665,6 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     
     await update.message.reply_text(
         text,
-        parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
@@ -572,18 +682,18 @@ async def tasks_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     progress = get_user_stats(user.id)
     
     text = (
-        f"🎯 *לוח משימות - התקדמות אישית*\n\n"
+        f"🎯 לוח משימות - התקדמות אישית\n\n"
         f"✅ הושלמו: {progress['completed_tasks']}/{progress['total_tasks']}\n"
         f"📊 נקודות: {progress['total_points']}\n"
         f"💰 טוקנים: {progress['total_tokens']}\n"
         f"🏆 דרגה: {progress['rank']}\n\n"
-        f"*רשימת המשימות:*\n"
+        f"רשימת המשימות:\n"
     )
     
     keyboard = []
     for task in tasks:
         status_icon = "🟢" if task['user_status'] == 'approved' else "🟡" if task['user_status'] == 'submitted' else "🔵" if task['user_status'] == 'started' else "⚪"
-        text += f"{status_icon} *משימה {task['task_number']}:* {task['title']}\n"
+        text += f"{status_icon} משימה {task['task_number']}: {task['title']}\n"
         text += f"   נקודות: {task['reward_points']} | טוקנים: {task['reward_tokens']}\n"
         
         if not task['user_status'] or task['user_status'] == 'pending':
@@ -609,9 +719,75 @@ async def tasks_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     
     await update.message.reply_text(
         text,
-        parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
+
+async def start_task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """מתחיל משימה"""
+    query = update.callback_query
+    await query.answer()
+    
+    user = query.from_user
+    task_number = int(query.data.split(':')[1])
+    
+    if start_task(user.id, task_number):
+        tasks = get_user_tasks(user.id)
+        task = next((t for t in tasks if t['task_number'] == task_number), None)
+        
+        if task:
+            await query.edit_message_text(
+                f"🎯 התחלת משימה {task_number}\n\n"
+                f"📝 {task['title']}\n\n"
+                f"📋 תיאור:\n{task['description']}\n\n"
+                f"🎁 פרס:\n"
+                f"• {task['reward_points']} נקודות\n"
+                f"• {task['reward_tokens']} טוקנים\n\n"
+                f"📤 כשתסיים, לחץ על 'הגש משימה'"
+            )
+        else:
+            await query.answer("❌ לא נמצאה משימה", show_alert=True)
+    else:
+        await query.answer("❌ שגיאה בהתחלת המשימה", show_alert=True)
+
+async def submit_task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """מגיש משימה"""
+    query = update.callback_query
+    await query.answer()
+    
+    user = query.from_user
+    task_number = int(query.data.split(':')[1])
+    
+    context.user_data['pending_task_submission'] = task_number
+    await query.edit_message_text(
+        f"📤 הגשת משימה {task_number}\n\n"
+        f"📝 שלח את ההוכחה להשלמת המשימה:\n"
+        f"(קישור, צילום מסך, או טקסט)\n\n"
+        f"💡 דוגמאות:\n"
+        f"• קישור לפוסט\n"
+        f"• צילום מסך של ההצטרפות\n"
+        f"• תיאור מפורט של מה עשית"
+    )
+
+async def handle_task_proof(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """מטפל בהוכחת משימה"""
+    user = update.effective_user
+    proof = update.message.text
+    
+    if 'pending_task_submission' not in context.user_data:
+        return
+    
+    task_number = context.user_data['pending_task_submission']
+    
+    if submit_task(user.id, task_number, proof):
+        await update.message.reply_text(
+            f"✅ המשימה {task_number} הוגשה בהצלחה!\n\n"
+            f"📤 ההוכחה נשלחה לאישור המנהלים.\n"
+            f"⏳ תקבל הודעה כאשר המשימה תאושר.\n\n"
+            f"💎 בינתיים, אתה יכול להמשיך למשימות אחרות!"
+        )
+        del context.user_data['pending_task_submission']
+    else:
+        await update.message.reply_text("❌ שגיאה בהגשת המשימה")
 
 # =========================
 # Callback Handlers
@@ -676,10 +852,10 @@ async def tasks_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     progress = get_user_stats(user.id)
     
     text = (
-        f"🎯 *לוח משימות - התקדמות אישית*\n\n"
+        f"🎯 לוח משימות - התקדמות אישית\n\n"
         f"✅ הושלמו: {progress['completed_tasks']}/{progress['total_tasks']}\n"
         f"📊 נקודות: {progress['total_points']}\n\n"
-        f"*בחר משימה:*"
+        f"בחר משימה:"
     )
     
     keyboard = []
@@ -710,7 +886,6 @@ async def tasks_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     
     await query.edit_message_text(
         text,
-        parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
@@ -723,16 +898,16 @@ async def wallet_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     wallet_address = get_user_wallet(user.id)
     
     text = (
-        f"💰 *ארנק אישי*\n\n"
+        f"💰 ארנק אישי\n\n"
         f"🪙 טוקנים: {stats['total_tokens']}\n"
         f"📊 נקודות: {stats['total_points']}\n"
         f"🎯 משימות: {stats['completed_tasks']}/{stats['total_tasks']}\n\n"
     )
     
     if wallet_address:
-        text += f"📍 `{wallet_address[:20]}...`\n"
+        text += f"📍 {wallet_address[:20]}...\n"
     else:
-        text += "📍 *לא הוגדר* ❌\n"
+        text += "📍 לא הוגדר ❌\n"
     
     keyboard = []
     if not wallet_address:
@@ -746,7 +921,6 @@ async def wallet_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     
     await query.edit_message_text(
         text,
-        parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
@@ -756,11 +930,10 @@ async def set_wallet_callback_handler(update: Update, context: ContextTypes.DEFA
     await query.answer()
     
     await query.edit_message_text(
-        "🔗 *הגדרת ארנק BSC*\n\n"
+        "🔗 הגדרת ארנק BSC\n\n"
         "שלח את כתובת ה-BSC Wallet שלך בפורמט:\n"
-        "`/set_wallet 0x742E4C4F4B6B577B8B9B0C1D2E3F4A5B6C7D8E9F`\n\n"
-        "אחרי שתגדיר את הארנק, תוכל לקבל טוקנים למשימות שלך!",
-        parse_mode="Markdown"
+        "/set_wallet 0x742E4C4F4B6B577B8B9B0C1D2E3F4A5B6C7D8E9F\n\n"
+        "אחרי שתגדיר את הארנק, תוכל לקבל טוקנים למשימות שלך!"
     )
 
 async def economy_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -768,11 +941,11 @@ async def economy_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     query = update.callback_query
     user = query.from_user
     
-    stats = academy_economy.get_user_economy_stats(user.id)
-    network_stats = academy_economy.get_network_stats(user.id)
+    stats = get_user_economy_stats(user.id)
+    network_stats = get_network_stats(user.id)
     
     text = (
-        f"🏦 *כלכלת האקדמיה*\n\n"
+        f"🏦 כלכלת האקדמיה\n\n"
         f"🪙 Academy Coins: {stats.get('academy_coins', 0):.2f}\n"
         f"📚 למידה: {stats.get('learning_points', 0)} נקודות\n"
         f"👨‍🏫 הוראה: {stats.get('teaching_points', 0)} נקודות\n"
@@ -790,7 +963,6 @@ async def economy_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     
     await query.edit_message_text(
         text,
-        parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
@@ -800,10 +972,10 @@ async def stats_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     user = query.from_user
     
     stats = get_user_stats(user.id)
-    economy_stats = academy_economy.get_user_economy_stats(user.id)
+    economy_stats = get_user_economy_stats(user.id)
     
     text = (
-        f"📊 *סטטיסטיקות אישיות*\n\n"
+        f"📊 סטטיסטיקות אישיות\n\n"
         f"🏆 {stats['rank']}\n\n"
         f"🎯 {stats['completed_tasks']}/{stats['total_tasks']} משימות\n"
         f"📊 {stats['total_points']} נקודות\n"
@@ -825,7 +997,6 @@ async def stats_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     
     await query.edit_message_text(
         text,
-        parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
@@ -838,9 +1009,9 @@ async def referrals_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     bot_username = (await context.bot.get_me()).username
     
     text = (
-        f"👥 *הזמן חברים*\n\n"
-        f"📧 *קישור הזמנה:*\n"
-        f"`https://t.me/{bot_username}?start=ref_{user.id}`\n\n"
+        f"👥 הזמן חברים\n\n"
+        f"📧 קישור הזמנה:\n"
+        f"https://t.me/{bot_username}?start=ref_{user.id}\n\n"
         f"🎁 5 נקודות + 5 טוקנים לחבר\n"
         f"📈 {stats['referral_count']} חברים הוזמנו\n"
         f"💎 {stats['referral_count'] * 5} נקודות בונוס"
@@ -853,7 +1024,6 @@ async def referrals_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     
     await query.edit_message_text(
         text,
-        parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
@@ -876,7 +1046,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     pending_approvals = get_pending_approvals()
     
     text = (
-        f"👑 *פאנל ניהול*\n\n"
+        f"👑 פאנל ניהול\n\n"
         f"⏳ {len(pending_approvals)} משימות ממתינות\n"
         f"👤 {user.first_name}\n\n"
         f"בחר פעולה:"
@@ -890,7 +1060,6 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     
     await query.edit_message_text(
         text,
-        parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
@@ -905,7 +1074,7 @@ async def admin_top_referrers_callback(update: Update, context: ContextTypes.DEF
     
     top_referrers = get_top_referrers(10)
     
-    text = "🏆 *טופ 10 מזמינים:*\n\n"
+    text = "🏆 טופ 10 מזמינים:\n\n"
     
     for i, referrer in enumerate(top_referrers, 1):
         text += f"{i}. {referrer['first_name']} (@{referrer['username'] or 'ללא'})\n"
@@ -920,7 +1089,6 @@ async def admin_top_referrers_callback(update: Update, context: ContextTypes.DEF
     
     await query.edit_message_text(
         text,
-        parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
@@ -998,17 +1166,17 @@ app = FastAPI()
 async def startup_event():
     """אתחול הבוט בעת הפעלת האפליקציה"""
     try:
+        # אתחול סכמת DB ראשון
+        logger.info("🔄 Initializing database schema...")
+        init_schema()
+        logger.info("✅ Database schema initialized successfully!")
+        
         await ptb_app.initialize()
         await ptb_app.bot.set_webhook(url=f"{WEBHOOK_URL}/webhook")
         register_handlers()
         logger.info("🤖 Bot started successfully!")
         logger.info(f"🌐 Webhook URL: {WEBHOOK_URL}/webhook")
         logger.info(f"👑 Admin IDs: {ADMIN_IDS}")
-        
-        # אתחול סכמת DB
-        logger.info("🔄 Initializing database schema...")
-        init_schema()
-        logger.info("✅ Database schema initialized successfully!")
         
     except Exception as e:
         logger.error(f"❌ Failed to start bot: {e}")
