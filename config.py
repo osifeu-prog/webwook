@@ -1,134 +1,129 @@
-# config.py
+# config.py - Configuration for WebWook Bot
 import os
-import logging
-from typing import List, Set
+from typing import Set
 
-# Logging Configuration
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler('bot.log', encoding='utf-8')
-    ]
-)
-
-# Bot Configuration
 class BotConfig:
-    BOT_TOKEN = os.environ.get("BOT_TOKEN")
-    WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "https://webwook-production.up.railway.app")
-    ADMIN_IDS: Set[int] = set(
-        int(x.strip()) for x in os.environ.get("ADMIN_USER_IDS", "224223270").split(",") 
-        if x.strip()
-    )
+    """Configuration for Telegram Bot"""
+    BOT_TOKEN = os.environ.get("BOT_TOKEN", "8351227223:AAHZyMmXdkKECnxTMvlEDYj5mFM9aOfnceI")
+    ADMIN_IDS = {int(x) for x in os.environ.get("ADMIN_USER_IDS", "224223270").split(",")}
     PORT = int(os.environ.get("PORT", 8080))
+    WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "https://webwook-production.up.railway.app")
     
-    # Features
-    ENABLE_TASKS = True
-    ENABLE_TOKEN_DISTRIBUTION = True
-    ENABLE_REFERRALS = True
-    ENABLE_PAYMENTS = False  # ניתן להפעיל בהמשך
+    # קבוצות וקהילות
+    ACADEMY_GROUP_LINK = "https://t.me/+WaA_aHzbwlU4MjNk"
+    NOTIFICATIONS_GROUP_LINK = "https://t.me/+GFJjgH6orbdkZGE8"
+    NOTIFICATIONS_GROUP_ID = -1001234567890  # צריך להחליף עם ID אמיתי
     
-    # Limits
-    MAX_TASK_PROOF_LENGTH = 2000
-    MAX_USERNAME_LENGTH = 32
-    DAILY_TASK_LIMIT = 10
-    REFERRAL_BONUS_POINTS = 5
-    REFERRAL_BONUS_TOKENS = 5
+    # תשלומים
+    ACADEMY_PRICE = 444
+    BANK_DETAILS = {
+        "bank": "בנק הפועלים",
+        "branch": "הסניף המרכזי", 
+        "account": "1234567"
+    }
 
-# Database Configuration
-class DatabaseConfig:
-    DATABASE_URL = os.environ.get("DATABASE_URL")
-    MAX_CONNECTIONS = 20
-    STATEMENT_TIMEOUT = 30000  # 30 seconds in milliseconds
-
-# Blockchain Configuration
-class BlockchainConfig:
-    BSC_RPC_URL = os.environ.get("BSC_RPC_URL", "https://bsc-dataseed.binance.org/")
-    TOKEN_CONTRACT = os.environ.get("TOKEN_CONTRACT", "0xACb0A09414CEA1C879c67bB7A877E4e19480f022")
-    DISTRIBUTOR_PRIVATE_KEY = os.environ.get("DISTRIBUTOR_PRIVATE_KEY")
-    
-    # Gas Settings
-    GAS_LIMIT = 100000
-    GAS_PRICE_MULTIPLIER = 1.1
-    MAX_GAS_PRICE = 50  # gwei
-    
-    # Token Settings
-    TOKEN_DECIMALS = 18
-    MIN_TOKEN_TRANSFER = 0.001
-
-# Task Configuration
 class TaskConfig:
-    TASKS = [
+    """Configuration for tasks system"""
+    DEFAULT_TASKS = [
         {
-            'number': 1,
-            'title': 'הצטרפות לערוץ הטלגרם',
-            'description': 'הצטרף לערוץ הטלגרם הרשמי שלנו והשאר שם לפחות 7 ימים',
-            'points': 5,
-            'tokens': 10,
-            'category': 'social'
+            "number": 1,
+            "title": "הצטרפות לערוץ הטלגרם",
+            "description": "הצטרף לערוץ הטלגרם הרשמי שלנו והשאר הודעה",
+            "points": 10,
+            "tokens": 5.0
         },
         {
-            'number': 2,
-            'title': 'שיתוף הפוסט הראשון',
-            'description': 'שתף את הפוסט הראשון בערוץ בקבוצה או בערוץ שלך',
-            'points': 10,
-            'tokens': 20,
-            'category': 'social'
+            "number": 2,
+            "title": "עקיבה אחרי טוויטר", 
+            "description": "עקוב אחרינו בטוויטר וצייץ על הפרויקט",
+            "points": 15,
+            "tokens": 7.5
         },
         {
-            'number': 3,
-            'title': 'הזמנת חבר ראשון',
-            'description': 'הזמן חבר אחד להצטרף לבוט',
-            'points': 15,
-            'tokens': 30,
-            'category': 'referral'
+            "number": 3,
+            "title": "הזמנת חבר ראשון",
+            "description": "הזמן חבר אחד להצטרף לבוט",
+            "points": 20,
+            "tokens": 10.0
         },
         {
-            'number': 4,
-            'title': 'יצירת פוסט מקורי',
-            'description': 'צור פוסט מקורי על הפרויקט ופרסם אותו',
-            'points': 20,
-            'tokens': 40,
-            'category': 'content'
+            "number": 4,
+            "title": "שיתוף בפייסבוק",
+            "description": "שתף את הפרויקט בדף הפייסבוק שלך", 
+            "points": 12,
+            "tokens": 6.0
         },
         {
-            'number': 5,
-            'title': 'השתתפות בתחרות',
-            'description': 'השתתף בתחרות החודשית שלנו',
-            'points': 25,
-            'tokens': 50,
-            'category': 'engagement'
+            "number": 5,
+            "title": "צפייה בסרטון הדרכה",
+            "description": "צפה בסרטון הדרכה וסכם בקצרה",
+            "points": 8,
+            "tokens": 4.0
+        },
+        {
+            "number": 6, 
+            "title": "השתתפות בדיסקורד",
+            "description": "הצטרף לשרת הדיסקורד והצג את עצמך",
+            "points": 10,
+            "tokens": 5.0
+        },
+        {
+            "number": 7,
+            "title": "כתיבת ביקורת",
+            "description": "כתוב ביקורת constructively על הפלטפורמה",
+            "points": 25, 
+            "tokens": 12.5
+        },
+        {
+            "number": 8,
+            "title": "יצירת תוכן",
+            "description": "צור תוכן מקורי על הפרויקט (פוסט, סרטון, etc.)",
+            "points": 30,
+            "tokens": 15.0
+        },
+        {
+            "number": 9,
+            "title": "הזמנת 3 חברים", 
+            "description": "הזמן 3 חברים חדשים לפרויקט",
+            "points": 40,
+            "tokens": 20.0
+        },
+        {
+            "number": 10,
+            "title": "הפיכת לשגריר",
+            "description": "הפוך לשגריר רשמי של הפרויקט", 
+            "points": 50,
+            "tokens": 25.0
         }
     ]
     
-    @classmethod
-    def get_task_by_number(cls, task_number: int) -> dict:
-        """מחזיר משימה לפי מספר"""
-        for task in cls.TASKS:
-            if task['number'] == task_number:
-                return task
-        return None
+    AUTO_APPROVE_TASKS = {1, 2, 3}  # משימות שאינן דורשות אישור מנהל
 
-# Validation
-def validate_config():
-    """בודק שהקונפיגורציה תקינה"""
-    errors = []
+class EconomyConfig:
+    """Configuration for economy system"""
+    DAILY_REWARD_BASE = 1.0
+    DAILY_REWARD_STREAK_BONUS = 0.1
+    MAX_STREAK_BONUS = 2.0
     
-    if not BotConfig.BOT_TOKEN:
-        errors.append("BOT_TOKEN is required")
+    LEARNING_POINTS_PER_MINUTE = 0.2
+    LEARNING_COINS_PER_MINUTE = 0.1
     
-    if not DatabaseConfig.DATABASE_URL:
-        errors.append("DATABASE_URL is required")
+    REFERRAL_BONUS = {
+        "points": 5,
+        "tokens": 5, 
+        "coins": 2
+    }
     
-    if BotConfig.ENABLE_TOKEN_DISTRIBUTION and not BlockchainConfig.DISTRIBUTOR_PRIVATE_KEY:
-        errors.append("DISTRIBUTOR_PRIVATE_KEY is required for token distribution")
+    ACADEMY_SIGNUP_BONUS = 100  # Academy Coins
     
-    if errors:
-        raise ValueError(f"Configuration errors: {', '.join(errors)}")
-
-# Validate on import
-try:
-    validate_config()
-except ValueError as e:
-    logging.error(f"Configuration error: {e}")
+    # דרגות Leadership
+    LEADERSHIP_LEVELS = {
+        1: {"name": "מתחיל 🌱", "students_needed": 0, "multiplier": 1.0},
+        2: {"name": "לומד 📚", "students_needed": 2, "multiplier": 1.1},
+        3: {"name": "מתרגל 💪", "students_needed": 4, "multiplier": 1.2},
+        4: {"name": "מתקדם ⭐", "students_needed": 8, "multiplier": 1.3},
+        5: {"name": "מומחה 🔥", "students_needed": 16, "multiplier": 1.4},
+        6: {"name": "מאסטר 🏆", "students_needed": 32, "multiplier": 1.5},
+        7: {"name": "גורו 🌟", "students_needed": 64, "multiplier": 1.6},
+        8: {"name": "לגנדרי ✨", "students_needed": 128, "multiplier": 1.7}
+    }
