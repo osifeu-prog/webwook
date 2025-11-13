@@ -17,10 +17,9 @@ from db import (
     add_teaching_reward, get_network_stats
 )
 from token_distributor import token_distributor
-from config import BotConfig, TaskConfig
+from config import BotConfig, TaskConfig, EconomyConfig
 from utils.validators import validate_wallet_address, validate_task_submission
 from utils.formatters import format_tokens, format_progress
-from economy import academy_economy
 
 # הגדרות לוג
 logging.basicConfig(
@@ -29,10 +28,16 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# משתני סביבה - משימוש BotConfig
-ADMIN_IDS = BotConfig.ADMIN_IDS
-PORT = BotConfig.PORT
-WEBHOOK_URL = BotConfig.WEBHOOK_URL
+# הסתרת טוקן בלוגים
+class SensitiveFilter(logging.Filter):
+    def filter(self, record):
+        token = BotConfig.BOT_TOKEN
+        if token and token in record.getMessage():
+            return False
+        return True
+
+for handler in logging.root.handlers:
+    handler.addFilter(SensitiveFilter())
 
 # אתחול הבוט
 ptb_app = Application.builder().token(BotConfig.BOT_TOKEN).build()
@@ -58,6 +63,17 @@ async def ensure_user(update: Update) -> bool:
         init_user_economy(user.id)
     
     return success
+
+async def send_to_notifications_group(context: ContextTypes.DEFAULT_TYPE, message: str) -> None:
+    """שולח הודעה לקבוצת ההודעות"""
+    try:
+        if hasattr(BotConfig, 'NOTIFICATIONS_GROUP_ID') and BotConfig.NOTIFICATIONS_GROUP_ID:
+            await context.bot.send_message(
+                chat_id=BotConfig.NOTIFICATIONS_GROUP_ID,
+                text=message
+            )
+    except Exception as e:
+        logger.info(f"לא ניתן לשלוח להודעות קבוצה: {e}")
 
 # =========================
 # Handlers בסיסיים
@@ -116,24 +132,24 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         f"4. ממירים ל-tokens אמיתיים 💰\n\n"
         
         f"🚀 גישה מלאה לאקדמיה:\n"
-        f"• עלות: 444 ש\"ח\n"
-        f"• קבוצת לימוד פרטית\n"
+        f"• עלות: {BotConfig.ACADEMY_PRICE} ש\"ח\n"
+        f"• קבוצת לימוד פרטית: {BotConfig.ACADEMY_GROUP_LINK}\n"
         f"• תמיכה אישית\n"
-        f"• 100 Academy Coins מתנה!\n\n"
+        f"• {EconomyConfig.ACADEMY_SIGNUP_BONUS} Academy Coins מתנה!\n\n"
         
         f"💼 זכור: האקדמיה היא הנכס הדיגיטלי שלך!\n"
         f"אתה בונה כאן עסק משלים שיכול להניב הכנסות פסיביות דרך כלכלת המשחק."
     )
 
     keyboard = [
-        [InlineKeyboardButton("🎓 הצטרפות לאקדמיה (444₪)", callback_data="join_academy")],
+        [InlineKeyboardButton(f"🎓 הצטרפות לאקדמיה ({BotConfig.ACADEMY_PRICE}₪)", callback_data="join_academy")],
         [InlineKeyboardButton("🎮 כלכלת המשחק", callback_data="economy")],
         [InlineKeyboardButton("🎯 משימות", callback_data="tasks")],
         [InlineKeyboardButton("💰 ארנק", callback_data="wallet")],
         [InlineKeyboardButton("📊 סטטיסטיקות", callback_data="stats")]
     ]
     
-    if user.id in ADMIN_IDS:
+    if user.id in BotConfig.ADMIN_IDS:
         keyboard.append([InlineKeyboardButton("👑 ניהול", callback_data="admin")])
     
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -176,13 +192,13 @@ async def referrals_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         f"📧 קישור הזמנה אישי:\n"
         f"https://t.me/{bot_username}?start=ref_{user.id}\n\n"
         f"🎁 מה תקבל:\n"
-        f"• 5 נקודות לכל חבר שהצטרף\n"
-        f"• 5 טוקנים לכל חבר שהצטרף\n"
-        f"• 2 Academy Coins לכל חבר שהצטרף\n\n"
+        f"• {EconomyConfig.REFERRAL_BONUS['points']} נקודות לכל חבר שהצטרף\n"
+        f"• {EconomyConfig.REFERRAL_BONUS['tokens']} טוקנים לכל חבר שהצטרף\n"
+        f"• {EconomyConfig.REFERRAL_BONUS['coins']} Academy Coins לכל חבר שהצטרף\n\n"
         f"📈 סטטיסטיקות ההפניות שלך:\n"
         f"• {stats['referral_count']} חברים הוזמנו\n"
-        f"• {stats['referral_count'] * 5} נקודות בונוס\n"
-        f"• {stats['referral_count'] * 5} טוקנים בונוס\n\n"
+        f"• {stats['referral_count'] * EconomyConfig.REFERRAL_BONUS['points']} נקודות בונוס\n"
+        f"• {stats['referral_count'] * EconomyConfig.REFERRAL_BONUS['tokens']} טוקנים בונוס\n\n"
         f"💎 הזמן עוד חברים ותרוויח יותר!"
     )
     
@@ -202,7 +218,7 @@ async def referrals_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """פקודת /admin - פאנל ניהול"""
     user = update.effective_user
-    if user.id not in ADMIN_IDS:
+    if user.id not in BotConfig.ADMIN_IDS:
         await update.message.reply_text("❌ אין הרשאה")
         return
     
@@ -241,7 +257,7 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 async def pending_tasks_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """פקודת /pending_tasks - הצגת משימות ממתינות"""
     user = update.effective_user
-    if user.id not in ADMIN_IDS:
+    if user.id not in BotConfig.ADMIN_IDS:
         await update.message.reply_text("❌ אין הרשאה")
         return
     
@@ -271,7 +287,7 @@ async def pending_tasks_command(update: Update, context: ContextTypes.DEFAULT_TY
 async def approve_task_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """פקודת /approve_task - אישור משימה"""
     user = update.effective_user
-    if user.id not in ADMIN_IDS:
+    if user.id not in BotConfig.ADMIN_IDS:
         await update.message.reply_text("❌ אין הרשאה")
         return
     
@@ -284,6 +300,28 @@ async def approve_task_command(update: Update, context: ContextTypes.DEFAULT_TYP
         task_number = int(context.args[1])
         
         if approve_task(user_id, task_number):
+            # שליחת הודעה למשתמש
+            try:
+                tasks = get_user_tasks(user_id)
+                task = next((t for t in tasks if t['task_number'] == task_number), None)
+                task_title = task['title'] if task else f"משימה {task_number}"
+                
+                await context.bot.send_message(
+                    chat_id=user_id,
+                    text=f"🎉 המשימה '{task_title}' אושרה!\n\n"
+                         f"✅ קיבלת את התגמולים עבור המשימה.\n"
+                         f"💎 המשיך ללמוד ולהרוויח!"
+                )
+                
+                # הודעה לקבוצת ההודעות
+                user_info = f"{task['first_name']} (@{task['username'] or 'ללא'})" if task else f"משתמש {user_id}"
+                await send_to_notifications_group(
+                    context,
+                    f"✅ משימה אושרה: {user_info} - {task_title}"
+                )
+            except Exception as e:
+                logger.info(f"לא ניתן לשלוח הודעה למשתמש: {e}")
+            
             await update.message.reply_text(f"✅ משימה {task_number} אושרה למשתמש {user_id}")
         else:
             await update.message.reply_text("❌ לא ניתן לאשר את המשימה")
@@ -293,28 +331,26 @@ async def approve_task_command(update: Update, context: ContextTypes.DEFAULT_TYP
 async def group_info_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """פקודת /group_info - מידע על הקבוצה"""
     user = update.effective_user
-    if user.id not in ADMIN_IDS:
+    if user.id not in BotConfig.ADMIN_IDS:
         await update.message.reply_text("❌ אין הרשאה")
         return
-    
-    group_link = "https://t.me/+WaA_aHzbwlU4MjNk"
     
     text = (
         f"👥 מידע קבוצת האקדמיה\n\n"
         f"🔗 קישור קבוצה:\n"
-        f"{group_link}\n\n"
+        f"{BotConfig.ACADEMY_GROUP_LINK}\n\n"
         f"📊 סטטיסטיקות:\n"
         f"• קישור קבוצה: פעיל ✅\n"
         f"• קבוצה פרטית: כן ✅\n"
         f"• גישה: למשתתפים בלבד 🔒\n\n"
         f"💡 הנחיות:\n"
-        f"1. הקבוצה מיועדת למשתתפים ששילמו 444 ש\"ח\n"
+        f"1. הקבוצה מיועדת למשתתפים ששילמו {BotConfig.ACADEMY_PRICE} ש\"ח\n"
         f"2. יש לאשר משתתפים ידנית\n"
         f"3. שמור על הקבוצה פעילה ואיכותית\n"
     )
     
     keyboard = [
-        [InlineKeyboardButton("🔗 פתח קבוצה", url=group_link)],
+        [InlineKeyboardButton("🔗 פתח קבוצה", url=BotConfig.ACADEMY_GROUP_LINK)],
         [InlineKeyboardButton("👑 חזרה לניהול", callback_data="admin")]
     ]
     
@@ -334,30 +370,32 @@ async def payment_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     # בדיקה אם כבר יש גישה
     if has_paid_access(user.id):
         await update.message.reply_text(
-            "✅ כבר יש לך גישה מלאה לאקדמיה!\n\n"
-            "🔗 קבוצת האקדמיה: https://t.me/+WaA_aHzbwlU4MjNk\n\n"
-            "💎 המשך ללמוד ולהרוויח!"
+            f"✅ כבר יש לך גישה מלאה לאקדמיה!\n\n"
+            f"🔗 קבוצת האקדמיה: {BotConfig.ACADEMY_GROUP_LINK}\n\n"
+            f"💎 המשך ללמוד ולהרוויח!"
         )
         return
+    
+    bank = BotConfig.BANK_DETAILS
     
     text = (
         f"🎓 הצטרפות לאקדמיה - השקעה בעצמך!\n\n"
         
         f"💼 מה מקבלים?\n"
         f"• גישה מלאה לבוט האקדמיה 🎯\n"
-        f"• הצטרפות לקבוצה הפרטית: https://t.me/+WaA_aHzbwlU4MjNk 👥\n"
+        f"• הצטרפות לקבוצה הפרטית: {BotConfig.ACADEMY_GROUP_LINK} 👥\n"
         f"• נכס דיגיטלי לכל החיים 📚\n"
         f"• יכולת לצרף משתתפים ולבנות רשת 🕸️\n"
         f"• מערכת מעקב והתקדמות מתקדמת 📊\n"
-        f"• 100 Academy Coins עם ההצטרפות 💎\n\n"
+        f"• {EconomyConfig.ACADEMY_SIGNUP_BONUS} Academy Coins עם ההצטרפות 💎\n\n"
         
-        f"💰 השקעה: 444 ש\"ח\n\n"
+        f"💰 השקעה: {BotConfig.ACADEMY_PRICE} ש\"ח\n\n"
         
         f"🏦 איך משלמים?\n"
-        f"1. העברה 444 ש\"ח לחשבון הבא:\n"
-        f"   בנק: ______\n"
-        f"   סניף: ______\n"
-        f"   חשבון: ______\n\n"
+        f"1. העברה {BotConfig.ACADEMY_PRICE} ש\"ח לחשבון הבא:\n"
+        f"   בנק: {bank['bank']}\n"
+        f"   סניף: {bank['branch']}\n"
+        f"   חשבון: {bank['account']}\n\n"
         
         f"2. שלח אישור תשלום עם השם שלך\n"
         f"3. נאשר בתוך 24 שעות\n\n"
@@ -368,7 +406,7 @@ async def payment_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     
     keyboard = [
         [InlineKeyboardButton("💳 אישור תשלום", callback_data="confirm_payment")],
-        [InlineKeyboardButton("❓ שאלות נפוצות", callback_data="payment_faq")],
+        [InlineKeyboardButton("🔗 קבוצת האקדמיה", url=BotConfig.ACADEMY_GROUP_LINK)],
         [InlineKeyboardButton("🏠 חזרה", callback_data="back_main")]
     ]
     
@@ -385,19 +423,24 @@ async def confirm_payment_callback(update: Update, context: ContextTypes.DEFAULT
     user = query.from_user
     
     # יצירת רשומת תשלום
-    if create_payment(user.id, 444.0, "bank_transfer"):
+    if create_payment(user.id, BotConfig.ACADEMY_PRICE, "bank_transfer"):
         context.user_data['pending_payment_confirmation'] = True
+        
+        bank = BotConfig.BANK_DETAILS
         
         await query.edit_message_text(
             f"💳 אישור תשלום\n\n"
-            f"1. בצע העברה של 444 ש\"ח\n"
+            f"1. בצע העברה של {BotConfig.ACADEMY_PRICE} ש\"ח לחשבון:\n"
+            f"   בנק: {bank['bank']}\n"
+            f"   סניף: {bank['branch']}\n"
+            f"   חשבון: {bank['account']}\n\n"
             f"2. שלח צילום מסך של ההעברה\n"
             f"3. פרטים נוספים:\n"
             f"   • שם מלא\n"
             f"   • מספר טלפון\n"
             f"   • אימייל (אופציונלי)\n\n"
             f"נאשר את ההצטרפות בתוך 24 שעות!\n\n"
-            f"📞 לשאלות: @your_contact"
+            f"🔗 לאחר האישור תקבל גישה ל: {BotConfig.ACADEMY_GROUP_LINK}"
         )
     else:
         await query.answer("❌ שגיאה ביצירת בקשת תשלום", show_alert=True)
@@ -428,13 +471,17 @@ async def economy_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         f"📈 מכפיל: x{stats.get('level_multiplier', 1.0)}\n"
         f"👥 תלמידים: {stats.get('student_count', 0)}\n"
         f"🎓 נדרשים לדרגה הבאה: {stats.get('next_level_students_needed', 0)} תלמידים\n\n"
-        
-        f"📊 סטטיסטיקות רשת:\n"
-        f"🔗 Level 1: {network_stats.get('level_1_students', 0)} תלמידים\n"
-        f"🔗 Level 2: {network_stats.get('level_2_students', 0)} תלמידים\n"
-        f"🔗 Level 3: {network_stats.get('level_3_students', 0)} תלמידים\n"
-        f"💵 רווחי רשת: {network_stats.get('total_network_earnings', 0):.2f} coins\n"
     )
+    
+    # הוספת נתוני רשת אם קיימים
+    if network_stats.get('level_1_students', 0) > 0 or network_stats.get('level_2_students', 0) > 0 or network_stats.get('level_3_students', 0) > 0:
+        text += (
+            f"📊 סטטיסטיקות רשת:\n"
+            f"🔗 Level 1: {network_stats.get('level_1_students', 0)} תלמידים\n"
+            f"🔗 Level 2: {network_stats.get('level_2_students', 0)} תלמידים\n"
+            f"🔗 Level 3: {network_stats.get('level_3_students', 0)} תלמידים\n"
+            f"💵 רווחי רשת: {network_stats.get('total_network_earnings', 0):.2f} coins\n"
+        )
     
     keyboard = [
         [InlineKeyboardButton("🎁 תיגמול יומי", callback_data="daily_reward")],
@@ -466,8 +513,14 @@ async def daily_reward_callback(update: Update, context: ContextTypes.DEFAULT_TY
             f"📈 סטריק נוכחי: {result['new_streak']} ימים\n\n"
             f"💎 חזור מחר לעוד תיגמול!"
         )
+        
+        # שליחה להודעות קבוצה
+        await send_to_notifications_group(
+            context,
+            f"🎉 {user.first_name} (@{user.username or 'ללא'}) קיבל תיגמול יומי של {result['reward']:.2f} coins! (סטריק: {result['new_streak']})"
+        )
     else:
-        await query.answer(result['message'], show_alert=True)
+        await query.answer(result.get('message', '❌ שגיאה בתיגמול היומי'), show_alert=True)
 
 async def learning_activity_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """פעילות לימודית"""
@@ -544,9 +597,51 @@ async def handle_activity_description(update: Update, context: ContextTypes.DEFA
             f"📚 סוג: {result['activity_type']}\n\n"
             f"💎 המשך ללמוד ולהרוויח!"
         )
+        
+        # שליחה להודעות קבוצה
+        await send_to_notifications_group(
+            context,
+            f"📚 {user.first_name} (@{user.username or 'ללא'}) השלים פעילות: {activity['type']} - {result['points_earned']} נקודות, {result['coins_earned']:.2f} coins"
+        )
+        
         del context.user_data['pending_activity']
     else:
         await update.message.reply_text("❌ שגיאה ברישום הפעילות")
+
+async def my_network_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """הרשת שלי"""
+    query = update.callback_query
+    await query.answer()
+    
+    user = query.from_user
+    network_stats = get_network_stats(user.id)
+    economy_stats = get_user_economy_stats(user.id)
+    
+    text = (
+        f"👥 הרשת הלימודית שלי\n\n"
+        f"📊 סטטיסטיקות רשת:\n"
+        f"🔗 Level 1: {network_stats.get('level_1_students', 0)} תלמידים\n"
+        f"🔗 Level 2: {network_stats.get('level_2_students', 0)} תלמידים\n"
+        f"🔗 Level 3: {network_stats.get('level_3_students', 0)} תלמידים\n"
+        f"💵 רווחי רשת: {network_stats.get('total_network_earnings', 0):.2f} coins\n\n"
+        
+        f"🎯 דרגת Leadership:\n"
+        f"🏆 {economy_stats.get('level_name', 'מתחיל')}\n"
+        f"👥 תלמידים: {economy_stats.get('student_count', 0)}\n"
+        f"🎓 נדרשים לדרגה הבאה: {economy_stats.get('next_level_students_needed', 0)} תלמידים\n\n"
+        
+        f"💡 טיפ: הזמן יותר חברים כדי להגדיל את הרשת ולהרוויח יותר!"
+    )
+    
+    keyboard = [
+        [InlineKeyboardButton("👥 הזמן חברים", callback_data="referrals")],
+        [InlineKeyboardButton("🔙 חזרה לכלכלה", callback_data="economy")]
+    ]
+    
+    await query.edit_message_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
 
 # =========================
 # Handlers ארנק וסטטיסטיקות
@@ -606,14 +701,14 @@ async def set_wallet_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     
     if not context.args:
         await update.message.reply_text(
-            "שימוש: /set_wallet <your_bsc_address>\n\n"
-            "דוגמה: /set_wallet 0x742E4C4F4B6B577B8B9B0C1D2E3F4A5B6C7D8E9F"
+            "שימוש: `/set_wallet <your_bsc_address>`\n\n"
+            "דוגמה: `/set_wallet 0x742E4C4F4B6B577B8B9B0C1D2E3F4A5B6C7D8E9F`"
         )
         return
     
     wallet_address = context.args[0]
     
-    # וולידציה עם הפונקציה החדשה
+    # וולידציה
     if not validate_wallet_address(wallet_address):
         await update.message.reply_text(
             "❌ כתובת ארנק לא תקינה. ודא שזו כתובת BSC חוקית (0x... באורך 42 תווים)"
@@ -779,6 +874,16 @@ async def handle_task_proof(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     task_number = context.user_data['pending_task_submission']
     
     if submit_task(user.id, task_number, proof):
+        # שליחה להודעות קבוצה
+        tasks = get_user_tasks(user.id)
+        task = next((t for t in tasks if t['task_number'] == task_number), None)
+        task_title = task['title'] if task else f"משימה {task_number}"
+        
+        await send_to_notifications_group(
+            context,
+            f"📤 {user.first_name} (@{user.username or 'ללא'}) הגיש משימה: {task_title}\n\n📝 הוכחה: {proof[:100]}..."
+        )
+        
         await update.message.reply_text(
             f"✅ המשימה {task_number} הוגשה בהצלחה!\n\n"
             f"📤 ההוכחה נשלחה לאישור המנהלים.\n"
@@ -836,6 +941,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await admin_top_referrers_callback(update, context)
     elif data == "admin_group_info":
         await group_info_command(update, context)
+    elif data == "my_network":
+        await my_network_callback(update, context)
     else:
         await query.answer("❌ פעולה לא זמינה", show_alert=True)
 
@@ -950,9 +1057,11 @@ async def economy_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         f"📚 למידה: {stats.get('learning_points', 0)} נקודות\n"
         f"👨‍🏫 הוראה: {stats.get('teaching_points', 0)} נקודות\n"
         f"🏆 {stats.get('level_name', 'מתחיל')} (רמה {stats.get('leadership_level', 1)})\n\n"
-        f"🔗 רשת: {network_stats.get('level_1_students', 0)} תלמידים\n"
-        f"💎 רווחי רשת: {network_stats.get('total_network_earnings', 0):.2f} coins\n"
     )
+    
+    if network_stats.get('level_1_students', 0) > 0:
+        text += f"🔗 רשת: {network_stats.get('level_1_students', 0)} תלמידים\n"
+        text += f"💎 רווחי רשת: {network_stats.get('total_network_earnings', 0):.2f} coins\n"
     
     keyboard = [
         [InlineKeyboardButton("🎁 תיגמול יומי", callback_data="daily_reward")],
@@ -1012,9 +1121,9 @@ async def referrals_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         f"👥 הזמן חברים\n\n"
         f"📧 קישור הזמנה:\n"
         f"https://t.me/{bot_username}?start=ref_{user.id}\n\n"
-        f"🎁 5 נקודות + 5 טוקנים לחבר\n"
+        f"🎁 {EconomyConfig.REFERRAL_BONUS['points']} נקודות + {EconomyConfig.REFERRAL_BONUS['tokens']} טוקנים לחבר\n"
         f"📈 {stats['referral_count']} חברים הוזמנו\n"
-        f"💎 {stats['referral_count'] * 5} נקודות בונוס"
+        f"💎 {stats['referral_count'] * EconomyConfig.REFERRAL_BONUS['points']} נקודות בונוס"
     )
     
     keyboard = [
@@ -1039,7 +1148,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     query = update.callback_query
     user = query.from_user
     
-    if user.id not in ADMIN_IDS:
+    if user.id not in BotConfig.ADMIN_IDS:
         await query.answer("❌ אין הרשאה", show_alert=True)
         return
     
@@ -1068,7 +1177,7 @@ async def admin_top_referrers_callback(update: Update, context: ContextTypes.DEF
     query = update.callback_query
     user = query.from_user
     
-    if user.id not in ADMIN_IDS:
+    if user.id not in BotConfig.ADMIN_IDS:
         await query.answer("❌ אין הרשאה", show_alert=True)
         return
     
@@ -1098,14 +1207,14 @@ async def start_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     user = query.from_user
     
     keyboard = [
-        [InlineKeyboardButton("🎓 הצטרפות לאקדמיה (444₪)", callback_data="join_academy")],
+        [InlineKeyboardButton(f"🎓 הצטרפות לאקדמיה ({BotConfig.ACADEMY_PRICE}₪)", callback_data="join_academy")],
         [InlineKeyboardButton("🎮 כלכלת המשחק", callback_data="economy")],
         [InlineKeyboardButton("🎯 משימות", callback_data="tasks")],
         [InlineKeyboardButton("💰 ארנק", callback_data="wallet")],
         [InlineKeyboardButton("📊 סטטיסטיקות", callback_data="stats")]
     ]
     
-    if user.id in ADMIN_IDS:
+    if user.id in BotConfig.ADMIN_IDS:
         keyboard.append([InlineKeyboardButton("👑 ניהול", callback_data="admin")])
     
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -1147,6 +1256,7 @@ def register_handlers():
     # handlers לכלכלת משחק
     ptb_app.add_handler(CallbackQueryHandler(daily_reward_callback, pattern="^daily_reward$"))
     ptb_app.add_handler(CallbackQueryHandler(learning_activity_callback, pattern="^learning_activity$"))
+    ptb_app.add_handler(CallbackQueryHandler(my_network_callback, pattern="^my_network$"))
     ptb_app.add_handler(CallbackQueryHandler(handle_learning_activity, pattern="^activity_"))
     ptb_app.add_handler(MessageHandler(filters.TEXT & filters.ChatType.PRIVATE, handle_activity_description))
     
@@ -1172,11 +1282,11 @@ async def startup_event():
         logger.info("✅ Database schema initialized successfully!")
         
         await ptb_app.initialize()
-        await ptb_app.bot.set_webhook(url=f"{WEBHOOK_URL}/webhook")
+        await ptb_app.bot.set_webhook(url=f"{BotConfig.WEBHOOK_URL}/webhook")
         register_handlers()
         logger.info("🤖 Bot started successfully!")
-        logger.info(f"🌐 Webhook URL: {WEBHOOK_URL}/webhook")
-        logger.info(f"👑 Admin IDs: {ADMIN_IDS}")
+        logger.info(f"🌐 Webhook URL: {BotConfig.WEBHOOK_URL}/webhook")
+        logger.info(f"👑 Admin IDs: {BotConfig.ADMIN_IDS}")
         
     except Exception as e:
         logger.error(f"❌ Failed to start bot: {e}")
@@ -1237,9 +1347,9 @@ async def debug():
         "pending_approvals": len(pending_approvals),
         "top_referrers": [{"name": r["first_name"], "count": r["referral_count"]} for r in top_referrers],
         "blockchain_connected": token_distributor.is_connected(),
-        "admin_ids": list(ADMIN_IDS)
+        "admin_ids": list(BotConfig.ADMIN_IDS)
     }
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=PORT)
+    uvicorn.run(app, host="0.0.0.0", port=BotConfig.PORT)
