@@ -890,7 +890,66 @@ async def debug():
         "blockchain_connected": token_distributor.is_connected(),
         "admin_ids": ADMIN_IDS
     }
+# ב-db.py - הוסף לאחר הטבלאות הקיימות
 
+# טבלת מנויים ותשלומים
+cur.execute("""
+    CREATE TABLE IF NOT EXISTS subscriptions (
+        id SERIAL PRIMARY KEY,
+        user_id BIGINT NOT NULL,
+        amount DECIMAL(10,2) NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        payment_method TEXT,
+        transaction_id TEXT,
+        access_granted BOOLEAN DEFAULT FALSE,
+        group_access BOOLEAN DEFAULT FALSE,
+        expires_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+""")
+
+# טבלת כלכלת משתמשים
+cur.execute("""
+    CREATE TABLE IF NOT EXISTS user_economy (
+        user_id BIGINT PRIMARY KEY,
+        academy_coins DECIMAL(18,8) DEFAULT 0,
+        learning_points INT DEFAULT 0,
+        teaching_points INT DEFAULT 0,
+        leadership_level INT DEFAULT 1,
+        total_earnings DECIMAL(18,8) DEFAULT 0,
+        daily_streak INT DEFAULT 0,
+        last_activity_date DATE,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+""")
+
+# טבלת רשת לימודית
+cur.execute("""
+    CREATE TABLE IF NOT EXISTS learning_network (
+        id SERIAL PRIMARY KEY,
+        teacher_id BIGINT NOT NULL,
+        student_id BIGINT NOT NULL,
+        level INT DEFAULT 1,
+        coins_earned DECIMAL(18,8) DEFAULT 0,
+        status TEXT DEFAULT 'active',
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        UNIQUE(teacher_id, student_id)
+    );
+""")
+
+# טבלת עסקאות כלכליות
+cur.execute("""
+    CREATE TABLE IF NOT EXISTS economy_transactions (
+        id SERIAL PRIMARY KEY,
+        user_id BIGINT NOT NULL,
+        transaction_type TEXT NOT NULL,
+        amount DECIMAL(18,8) NOT NULL,
+        description TEXT,
+        related_user_id BIGINT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+""")
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=PORT)
