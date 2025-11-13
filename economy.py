@@ -1,9 +1,18 @@
-# economy.py - כלכלת המשחק המתקדמת
+# economy.py - כלכלת המשחק המתקדמת (מתוקן)
 import logging
 from decimal import Decimal
 from datetime import datetime, timedelta
 from typing import Dict, Any, List
-from db import db_cursor
+from db import (
+    init_user_economy, 
+    update_user_economy, 
+    add_economy_transaction,
+    get_user_economy_stats as db_get_user_economy_stats,
+    get_network_stats as db_get_network_stats,
+    add_learning_activity as db_add_learning_activity,
+    claim_daily_reward as db_claim_daily_reward,
+    add_teaching_reward as db_add_teaching_reward
+)
 
 logger = logging.getLogger(__name__)
 
@@ -13,363 +22,173 @@ class AcademyEconomy:
         self.learning_multiplier = Decimal('1.5')
         self.teaching_bonus = Decimal('0.3')
         self.leadership_levels = {
-            1: {'name': 'מתחיל', 'multiplier': 1.0, 'students_needed': 0},
-            2: {'name': 'חונך', 'multiplier': 1.2, 'students_needed': 3},
-            3: {'name': 'מדריך', 'multiplier': 1.5, 'students_needed': 10},
-            4: {'name': 'מאסטר', 'multiplier': 2.0, 'students_needed': 25},
-            5: {'name': 'גורו', 'multiplier': 3.0, 'students_needed': 50}
+            1: {'name': 'מתחיל 🌱', 'multiplier': 1.0, 'students_needed': 0},
+            2: {'name': 'לומד 📚', 'multiplier': 1.1, 'students_needed': 2},
+            3: {'name': 'מתרגל 💪', 'multiplier': 1.2, 'students_needed': 5},
+            4: {'name': 'מתקדם ⭐', 'multiplier': 1.4, 'students_needed': 10},
+            5: {'name': 'מומחה 🔥', 'multiplier': 1.7, 'students_needed': 20},
+            6: {'name': 'מאסטר 🏆', 'multiplier': 2.0, 'students_needed': 35},
+            7: {'name': 'גורו 🌟', 'multiplier': 2.5, 'students_needed': 50},
+            8: {'name': 'לגנדרי ✨', 'multiplier': 3.0, 'students_needed': 100}
         }
 
     def init_user_economy(self, user_id: int) -> bool:
         """מאתחל פרופיל כלכלי למשתמש חדש"""
-        with db_cursor() as (conn, cur):
-            if cur is None:
-                return False
-            try:
-                cur.execute("""
-                    INSERT INTO user_economy (user_id, last_activity_date)
-                    VALUES (%s, CURRENT_DATE)
-                    ON CONFLICT (user_id) DO NOTHING;
-                """, (user_id,))
-                return True
-            except Exception as e:
-                logger.error(f"Failed to init user economy: {e}")
-                return False
+        return init_user_economy(user_id)
 
     def claim_daily_reward(self, user_id: int) -> Dict[str, Any]:
         """תגמול יומי וסטריק"""
-        with db_cursor() as (conn, cur):
-            if cur is None:
-                return {'success': False, 'message': 'Database error'}
-            
-            try:
-                # בודק את הפעילות האחרונה
-                cur.execute("""
-                    SELECT daily_streak, last_activity_date, academy_coins 
-                    FROM user_economy WHERE user_id = %s;
-                """, (user_id,))
-                
-                result = cur.fetchone()
-                if not result:
-                    self.init_user_economy(user_id)
-                    return {'success': False, 'message': 'Profile not initialized'}
-                
-                streak = result['daily_streak']
-                last_date = result['last_activity_date']
-                today = datetime.now().date()
-                
-                # בודק אם כבר קיבל היום
-                if last_date == today:
-                    return {'success': False, 'message': 'Already claimed today'}
-                
-                # מחשב סטריק חדש
-                if last_date and last_date == today - timedelta(days=1):
-                    new_streak = streak + 1
-                else:
-                    new_streak = 1
-                
-                # מחשב תגמול
-                base_reward = Decimal('10')  # coins בסיסיים
-                streak_bonus = Decimal(str(min(new_streak * 2, 50)))  # בונוס סטריק מקסימלי 50
-                total_reward = base_reward + streak_bonus
-                
-                # מעדכן את המשתמש
-                cur.execute("""
-                    UPDATE user_economy 
-                    SET academy_coins = academy_coins + %s,
-                        daily_streak = %s,
-                        last_activity_date = %s,
-                        total_earnings = total_earnings + %s
-                    WHERE user_id = %s;
-                """, (total_reward, new_streak, today, total_reward, user_id))
-                
-                # רושם עסקה
-                cur.execute("""
-                    INSERT INTO economy_transactions 
-                    (user_id, transaction_type, amount, description)
-                    VALUES (%s, 'daily_reward', %s, 'Daily reward - streak: ' || %s);
-                """, (user_id, total_reward, new_streak))
-                
-                return {
-                    'success': True,
-                    'reward': total_reward,
-                    'new_streak': new_streak,
-                    'base_reward': base_reward,
-                    'streak_bonus': streak_bonus
-                }
-                
-            except Exception as e:
-                logger.error(f"Failed to claim daily reward: {e}")
-                return {'success': False, 'message': 'System error'}
+        return db_claim_daily_reward(user_id)
 
     def add_learning_activity(self, user_id: int, activity_type: str, duration_minutes: int = 30) -> Dict[str, Any]:
         """מוסיף נקודות למידה עבור פעילות"""
-        with db_cursor() as (conn, cur):
-            if cur is None:
-                return {'success': False}
-            
-            try:
-                # נקודות למידה בסיסיות
-                base_points = duration_minutes // 10  # נקודה כל 10 דקות
-                coins_earned = Decimal(str(base_points)) * self.base_coin_rate
-                
-                # מעדכן משתמש
-                cur.execute("""
-                    UPDATE user_economy 
-                    SET learning_points = learning_points + %s,
-                        academy_coins = academy_coins + %s,
-                        total_earnings = total_earnings + %s
-                    WHERE user_id = %s;
-                """, (base_points, coins_earned, coins_earned, user_id))
-                
-                # רושם עסקה
-                cur.execute("""
-                    INSERT INTO economy_transactions 
-                    (user_id, transaction_type, amount, description)
-                    VALUES (%s, 'learning', %s, %s);
-                """, (user_id, coins_earned, f'Learning activity: {activity_type}'))
-                
-                return {
-                    'success': True,
-                    'points_earned': base_points,
-                    'coins_earned': coins_earned,
-                    'activity_type': activity_type
-                }
-                
-            except Exception as e:
-                logger.error(f"Failed to add learning activity: {e}")
-                return {'success': False}
+        return db_add_learning_activity(user_id, activity_type, duration_minutes)
 
     def add_teaching_reward(self, teacher_id: int, student_id: int, reward_type: str = 'referral') -> Dict[str, Any]:
         """תגמול עבור הוראה והדרכה"""
-        with db_cursor() as (conn, cur):
-            if cur is None:
-                return {'success': False}
-            
-            try:
-                # בודק אם כבר קיבל תגמול עבור תלמיד זה
-                cur.execute("""
-                    SELECT 1 FROM learning_network 
-                    WHERE teacher_id = %s AND student_id = %s;
-                """, (teacher_id, student_id))
-                
-                if cur.fetchone():
-                    return {'success': False, 'message': 'Already rewarded for this student'}
-                
-                # תגמול בסיסי
-                teaching_points = 10
-                coins_earned = Decimal('5')  # coins עבור תלמיד חדש
-                
-                # מעדכן מורה
-                cur.execute("""
-                    UPDATE user_economy 
-                    SET teaching_points = teaching_points + %s,
-                        academy_coins = academy_coins + %s,
-                        total_earnings = total_earnings + %s
-                    WHERE user_id = %s;
-                """, (teaching_points, coins_earned, coins_earned, teacher_id))
-                
-                # מוסיף לרשת הלימודית
-                cur.execute("""
-                    INSERT INTO learning_network 
-                    (teacher_id, student_id, coins_earned)
-                    VALUES (%s, %s, %s);
-                """, (teacher_id, student_id, coins_earned))
-                
-                # רושם עסקה
-                cur.execute("""
-                    INSERT INTO economy_transactions 
-                    (user_id, transaction_type, amount, description, related_user_id)
-                    VALUES (%s, 'teaching', %s, %s, %s);
-                """, (teacher_id, coins_earned, f'Teaching reward: {reward_type}', student_id))
-                
-                # בודק קידום דרגה
-                self.check_leadership_promotion(teacher_id)
-                
-                return {
-                    'success': True,
-                    'points_earned': teaching_points,
-                    'coins_earned': coins_earned,
-                    'student_id': student_id
-                }
-                
-            except Exception as e:
-                logger.error(f"Failed to add teaching reward: {e}")
-                return {'success': False}
+        return db_add_teaching_reward(teacher_id, student_id, reward_type)
 
     def check_leadership_promotion(self, user_id: int) -> bool:
         """בודק ומקדם דרגת leadership"""
-        with db_cursor() as (conn, cur):
-            if cur is None:
+        try:
+            stats = self.get_user_economy_stats(user_id)
+            if not stats:
                 return False
             
-            try:
-                # סופר תלמידים
-                cur.execute("""
-                    SELECT COUNT(*) as student_count 
-                    FROM learning_network 
-                    WHERE teacher_id = %s AND status = 'active';
-                """, (user_id,))
+            student_count = stats.get('student_count', 0)
+            current_level = stats.get('leadership_level', 1)
+            
+            # בודק קידום
+            new_level = current_level
+            for level, data in self.leadership_levels.items():
+                if level > current_level and student_count >= data['students_needed']:
+                    new_level = level
+            
+            if new_level > current_level:
+                # מעדכן דרגה
+                updates = {
+                    'leadership_level': new_level,
+                    'academy_coins': stats.get('academy_coins', 0) + (new_level * 5)
+                }
                 
-                result = cur.fetchone()
-                student_count = result['student_count'] if result else 0
+                success = update_user_economy(user_id, updates)
                 
-                # מוצא את הדרגה הנוכחית
-                cur.execute("""
-                    SELECT leadership_level FROM user_economy WHERE user_id = %s;
-                """, (user_id,))
+                if success:
+                    # מוסיף עסקה לכבוד הקידום
+                    promotion_bonus = new_level * 5
+                    add_economy_transaction(
+                        user_id, 
+                        'leadership_promotion', 
+                        float(promotion_bonus),
+                        f'Promoted to {self.leadership_levels[new_level]["name"]}'
+                    )
                 
-                result = cur.fetchone()
-                current_level = result['leadership_level'] if result else 1
-                
-                # בודק קידום
-                new_level = current_level
-                for level, data in self.leadership_levels.items():
-                    if level > current_level and student_count >= data['students_needed']:
-                        new_level = level
-                
-                if new_level > current_level:
-                    cur.execute("""
-                        UPDATE user_economy 
-                        SET leadership_level = %s 
-                        WHERE user_id = %s;
-                    """, (new_level, user_id))
-                    
-                    # תגמול קידום
-                    promotion_bonus = Decimal(str(new_level * 10))
-                    cur.execute("""
-                        UPDATE user_economy 
-                        SET academy_coins = academy_coins + %s,
-                            total_earnings = total_earnings + %s
-                        WHERE user_id = %s;
-                    """, (promotion_bonus, promotion_bonus, user_id))
-                    
-                    # רושם עסקה
-                    cur.execute("""
-                        INSERT INTO economy_transactions 
-                        (user_id, transaction_type, amount, description)
-                        VALUES (%s, 'promotion', %s, %s);
-                    """, (user_id, promotion_bonus, f'Promotion to level {new_level}'))
-                    
-                    return True
-                
-                return False
-                
-            except Exception as e:
-                logger.error(f"Failed to check leadership promotion: {e}")
-                return False
+                return success
+            
+            return False
+            
+        except Exception as e:
+            logger.error(f"Failed to check leadership promotion: {e}")
+            return False
 
     def get_user_economy_stats(self, user_id: int) -> Dict[str, Any]:
         """מחזיר סטטיסטיקות כלכליות של משתמש"""
-        with db_cursor() as (conn, cur):
-            if cur is None:
-                return {}
-            
-            try:
-                # נתוני משתמש
-                cur.execute("""
-                    SELECT * FROM user_economy WHERE user_id = %s;
-                """, (user_id,))
-                
-                user_data = cur.fetchone()
-                if not user_data:
-                    self.init_user_economy(user_id)
-                    return self.get_user_economy_stats(user_id)
-                
-                # סופר תלמידים
-                cur.execute("""
-                    SELECT COUNT(*) as student_count 
-                    FROM learning_network 
-                    WHERE teacher_id = %s AND status = 'active';
-                """, (user_id,))
-                
-                student_result = cur.fetchone()
-                student_count = student_result['student_count'] if student_result else 0
-                
-                # דרגה נוכחית
-                current_level = user_data['leadership_level']
-                level_data = self.leadership_levels.get(current_level, {})
-                next_level = current_level + 1
-                next_level_data = self.leadership_levels.get(next_level, {})
-                
-                # היסטוריית עסקאות אחרונות
-                cur.execute("""
-                    SELECT * FROM economy_transactions 
-                    WHERE user_id = %s 
-                    ORDER BY created_at DESC 
-                    LIMIT 5;
-                """, (user_id,))
-                
-                transactions = [dict(row) for row in cur.fetchall()]
-                
-                return {
-                    'academy_coins': user_data['academy_coins'],
-                    'learning_points': user_data['learning_points'],
-                    'teaching_points': user_data['teaching_points'],
-                    'leadership_level': current_level,
-                    'level_name': level_data.get('name', 'מתחיל'),
-                    'level_multiplier': level_data.get('multiplier', 1.0),
-                    'total_earnings': user_data['total_earnings'],
-                    'daily_streak': user_data['daily_streak'],
-                    'student_count': student_count,
-                    'next_level_students_needed': next_level_data.get('students_needed', 0),
-                    'recent_transactions': transactions
-                }
-                
-            except Exception as e:
-                logger.error(f"Failed to get user economy stats: {e}")
-                return {}
+        return db_get_user_economy_stats(user_id)
 
     def get_network_stats(self, user_id: int) -> Dict[str, Any]:
         """מחזיר סטטיסטיקות רשת"""
-        with db_cursor() as (conn, cur):
-            if cur is None:
-                return {}
+        return db_get_network_stats(user_id)
+
+    def convert_coins_to_tokens(self, user_id: int, coins_amount: float) -> Dict[str, Any]:
+        """ממיר Academy Coins ל-tokens אמיתיים"""
+        try:
+            stats = self.get_user_economy_stats(user_id)
+            if not stats:
+                return {'success': False, 'message': 'User not found'}
             
-            try:
-                # רמות הרשת
-                cur.execute("""
-                    WITH RECURSIVE network_tree AS (
-                        SELECT student_id, 1 as level 
-                        FROM learning_network 
-                        WHERE teacher_id = %s
-                        
-                        UNION ALL
-                        
-                        SELECT ln.student_id, nt.level + 1 
-                        FROM learning_network ln
-                        JOIN network_tree nt ON ln.teacher_id = nt.student_id
-                        WHERE nt.level < 3
-                    )
-                    SELECT level, COUNT(*) as count 
-                    FROM network_tree 
-                    GROUP BY level 
-                    ORDER BY level;
-                """, (user_id,))
-                
-                level_counts = {row['level']: row['count'] for row in cur.fetchall()}
-                
-                # הכנסות מרשת
-                cur.execute("""
-                    SELECT SUM(coins_earned) as network_earnings 
-                    FROM learning_network 
-                    WHERE teacher_id = %s;
-                """, (user_id,))
-                
-                earnings_result = cur.fetchone()
-                network_earnings = earnings_result['network_earnings'] if earnings_result else Decimal('0')
+            current_coins = stats.get('academy_coins', 0)
+            
+            if coins_amount > current_coins:
+                return {'success': False, 'message': 'Not enough coins'}
+            
+            # שער המרה (לדוגמה: 10 coins = 1 token)
+            conversion_rate = 10.0
+            tokens_amount = coins_amount / conversion_rate
+            
+            # מעדכן את מאזן ה-coins
+            updates = {
+                'academy_coins': current_coins - coins_amount
+            }
+            
+            success = update_user_economy(user_id, updates)
+            
+            if success:
+                # רושם את ההמרה
+                add_economy_transaction(
+                    user_id,
+                    'coin_conversion',
+                    -coins_amount,
+                    f'Converted {coins_amount} coins to {tokens_amount} tokens'
+                )
                 
                 return {
-                    'level_1_students': level_counts.get(1, 0),
-                    'level_2_students': level_counts.get(2, 0),
-                    'level_3_students': level_counts.get(3, 0),
-                    'total_network_earnings': network_earnings,
-                    'network_depth': 3  # עומק הרשת המקסימלי
+                    'success': True,
+                    'coins_converted': coins_amount,
+                    'tokens_received': tokens_amount,
+                    'new_balance': current_coins - coins_amount
                 }
-                
-            except Exception as e:
-                logger.error(f"Failed to get network stats: {e}")
-                return {}
+            else:
+                return {'success': False, 'message': 'Conversion failed'}
+            
+        except Exception as e:
+            logger.error(f"Failed to convert coins: {e}")
+            return {'success': False, 'message': 'System error'}
+
+    def get_leaderboard(self, limit: int = 10) -> List[Dict[str, Any]]:
+        """מחזיר טבלת מובילים לפי Academy Coins"""
+        try:
+            import psycopg2
+            from psycopg2.extras import RealDictCursor
+            
+            conn = psycopg2.connect(os.environ.get("DATABASE_URL"), sslmode='require')
+            cur = conn.cursor(cursor_factory=RealDictCursor)
+            
+            cur.execute("""
+                SELECT 
+                    u.user_id,
+                    u.first_name,
+                    u.username,
+                    ue.academy_coins,
+                    ue.leadership_level,
+                    ue.learning_points,
+                    ue.teaching_points
+                FROM user_economy ue
+                JOIN users u ON ue.user_id = u.user_id
+                ORDER BY ue.academy_coins DESC
+                LIMIT %s
+            """, (limit,))
+            
+            leaderboard = []
+            for i, row in enumerate(cur.fetchall(), 1):
+                leaderboard.append({
+                    'rank': i,
+                    'user_id': row['user_id'],
+                    'name': row['first_name'] or f"User {row['user_id']}",
+                    'username': row['username'],
+                    'academy_coins': float(row['academy_coins']),
+                    'leadership_level': row['leadership_level'],
+                    'learning_points': row['learning_points'],
+                    'teaching_points': row['teaching_points']
+                })
+            
+            cur.close()
+            conn.close()
+            
+            return leaderboard
+            
+        except Exception as e:
+            logger.error(f"Failed to get leaderboard: {e}")
+            return []
 
 # Instance גלובלי
 academy_economy = AcademyEconomy()
